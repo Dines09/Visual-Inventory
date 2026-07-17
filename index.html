@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Visual Inventory</title>
+<meta name="theme-color" content="#111418">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app"></div>
+
+<script src="lib/minizip.js"></script>
+<script src="lib/xlsx-writer.js"></script>
+<script src="js/db.js"></script>
+<script src="js/helpers.js"></script>
+<script src="js/app.js"></script>
+<script src="js/location-view.js"></script>
+<script src="js/hotspot-modal.js"></script>
+<script src="js/export.js"></script>
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('service-worker.js').then(reg => {
+      // Actively check for a newer service worker every time the app opens, so fixes
+      // reach installed PWAs (mobile) without the user having to reinstall.
+      reg.update();
+      reg.addEventListener('updatefound', () => {
+        const nw = reg.installing;
+        if (!nw) return;
+        nw.addEventListener('statechange', () => {
+          // A new SW has installed and there was already one controlling the page →
+          // fresh code is ready; reload once so it takes effect immediately.
+          if (nw.state === 'installed' && navigator.serviceWorker.controller) {
+            window.location.reload();
+          }
+        });
+      });
+    }).catch(err => console.error('SW registration failed', err));
+    // Guard so the reload above only ever fires once per page load.
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (reloaded) return; reloaded = true;
+    });
+  });
+}
+</script>
+</body>
+</html>

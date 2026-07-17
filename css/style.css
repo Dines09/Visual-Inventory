@@ -1,0 +1,1179 @@
+:root, :root[data-theme="dark"] {
+  --bg: #111418;
+  --bg-elevated: #1a1e24;
+  --bg-card: #20252c;
+  --border: #2c323b;
+  --text: #e8eaed;
+  --text-dim: #9aa1ab;
+  --accent: #4a9eff;
+  --accent-dim: #2c6bb3;
+  --danger: #e5484d;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+:root[data-theme="light"] {
+  --bg: #f2f4f7;
+  --bg-elevated: #ffffff;
+  --bg-card: #ffffff;
+  --border: #dde1e7;
+  --text: #1b1e23;
+  --text-dim: #626a76;
+  --accent: #2f7fe0;
+  --accent-dim: #1f5fb0;
+  --danger: #d5323a;
+}
+/* subtle elevation for cards/topbar in light mode (white-on-light needs it) */
+:root[data-theme="light"] .location-card,
+:root[data-theme="light"] .modal-sheet {
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+/* #9: never let a long-press select text or pop the browser's selection/lookup bubble.
+   Applies app-wide; real text fields re-enable selection below so typing/editing works. */
+html, body, #app {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+input, textarea, select, [contenteditable="true"] {
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
+}
+
+html, body {
+  margin: 0; padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  overscroll-behavior: none;
+}
+
+#app {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: calc(10px + var(--safe-top)) 12px 10px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  z-index: 10;
+}
+
+.topbar h1 {
+  font-size: 18px;
+  margin: 0;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.icon-btn {
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 20px;
+  padding: 10px;
+  min-width: 44px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.icon-btn:active { background: var(--bg-card); }
+
+.btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  padding: 12px 18px;
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 44px;
+  transition: transform 0.08s ease, background 0.15s ease, opacity 0.15s ease;
+}
+.btn:active { background: var(--accent-dim); transform: scale(0.97); }
+.btn.secondary {
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.btn.danger { background: var(--danger); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
+/* #6: button row pinned at the top of a form (above inputs), non-sticky */
+.btn-row-top { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.btn-row-top .btn { flex: 1; }
+
+.view {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: calc(16px + var(--safe-bottom));
+}
+
+/* Home screen: location grid */
+.location-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 14px;
+  padding: 14px;
+}
+.location-card {
+  background: var(--bg-card);
+  border-radius: 14px;
+  overflow: hidden;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  transition: transform 0.1s ease;
+}
+.location-card:active { transform: scale(0.97); }
+.search-result-item:active,
+.hotspot-list-item:active { background: var(--bg-card); }
+.stage.animate { transition: transform 0.26s cubic-bezier(0.22,0.61,0.36,1); }
+.location-card .thumb {
+  width: 100%;
+  aspect-ratio: 4/3;
+  background: var(--bg-elevated) center/cover no-repeat;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-dim);
+  font-size: 32px;
+}
+.location-card .label {
+  padding: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Folder (container) tiles + drag-and-drop grouping */
+.folder-card { border-style: dashed; }
+.folder-card .folder-thumb { font-size: 40px; }
+.location-card .label .count-badge {
+  margin-left: auto;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.location-card.dragging { opacity: 0.35; }
+.location-card.drop-hover {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+  transform: scale(1.03);
+}
+body.tiles-dragging { cursor: grabbing; }
+body.tiles-dragging .location-card { transition: transform 0.12s ease; }
+.drag-ghost {
+  position: fixed;
+  z-index: 700;
+  width: 120px;
+  margin: 0;
+  transform: translate(-50%, -50%) rotate(-3deg) scale(0.9);
+  pointer-events: none;
+  opacity: 0.92;
+  box-shadow: 0 10px 26px rgba(0,0,0,0.5);
+}
+.menu-item { width: 100%; text-align: left; justify-content: flex-start; margin-bottom: 8px; }
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 24px;
+  text-align: center;
+  color: var(--text-dim);
+  gap: 16px;
+}
+.empty-state .big-icon { font-size: 48px; }
+
+.fab {
+  position: fixed;
+  right: calc(18px);
+  bottom: calc(18px + var(--safe-bottom));
+  width: 58px; height: 58px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 28px;
+  border: none;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.4);
+  cursor: pointer;
+  z-index: 20;
+  display: flex; align-items: center; justify-content: center;
+}
+
+/* Location viewer (cover photo + pins) */
+.location-viewer {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+  touch-action: none;
+  /* #1: never let tapping the photo/markers trigger text selection or the
+     long-press context/selection popup on mobile */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.location-viewer .stage {
+  position: absolute;
+  top: 0; left: 0;
+  transform-origin: 0 0;
+  backface-visibility: hidden;
+}
+.location-viewer .stage.zooming { will-change: transform; }
+/* Multi-page canvas: each page image is absolutely positioned by its offset. */
+.location-viewer .stage.stage-multi { position: absolute; }
+.location-viewer .page-block {
+  position: absolute;
+  line-height: 0;
+  backface-visibility: hidden;
+  /* Free-angle rotation + resize are applied as a transform about the block centre; pins
+     live inside the block so they rotate/scale with the image. */
+  transform-origin: center center;
+}
+.location-viewer .page-block > img.cover-img { width: 100%; height: 100%; display: block; }
+.location-viewer .page-block .pin-layer {
+  position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+}
+.location-viewer.layout-mode .page-block { outline: 2px dashed rgba(255,255,255,0.5); cursor: move; }
+.location-viewer .page-block.page-dragging { outline: 2px solid #fff; opacity: 0.9; }
+/* Corner resize handles — hidden unless the location is in layout mode. */
+.page-resize-handle { display: none; }
+.location-viewer.layout-mode .page-resize-handle {
+  display: block;
+  position: absolute;
+  width: 30px; height: 30px;
+  /* White handle with a dark ring — deliberately NOT blue, so it never gets confused with a
+     blue box hotspot marker. */
+  background: #fff;
+  border: 2px solid rgba(0,0,0,0.55);
+  border-radius: 50%;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.5);
+  z-index: 5;
+  touch-action: none;
+}
+.location-viewer.layout-mode .page-resize-handle.nw { left: -15px; top: -15px; cursor: nwse-resize; }
+.location-viewer.layout-mode .page-resize-handle.ne { right: -15px; top: -15px; cursor: nesw-resize; }
+.location-viewer.layout-mode .page-resize-handle.sw { left: -15px; bottom: -15px; cursor: nesw-resize; }
+.location-viewer.layout-mode .page-resize-handle.se { right: -15px; bottom: -15px; cursor: nwse-resize; }
+/* #16: dim everything except annotation markers so they pop. */
+.location-viewer.anno-highlight .page-block > img.cover-img { filter: brightness(0.55); }
+.location-viewer.anno-highlight .pin.annotation .pin-dot {
+  box-shadow: 0 0 0 3px rgba(255,255,255,0.85), 0 0 10px 4px rgba(229,72,72,0.9);
+  background: rgba(229,72,72,0.95);
+}
+.location-viewer img.cover-img {
+  display: block;
+  max-width: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+  -webkit-touch-callout: none;
+}
+.pin, .pin * {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.pin {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  pointer-events: auto;
+}
+.pin .pin-dot {
+  width: 30px; height: 30px;
+  border-radius: 50% 50% 50% 0;
+  background: var(--accent);
+  transform: rotate(-45deg);
+  border: 2px solid #fff;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.5);
+  display: flex; align-items: center; justify-content: center;
+}
+.pin .pin-dot span {
+  transform: rotate(45deg);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+}
+.pin.annotation .pin-dot {
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  transform: none;
+  background: rgba(229, 72, 72, 0.55); /* #15: annotations are red (semi-transparent) */
+  border: 1px solid rgba(255,255,255,0.7);
+}
+.pin.annotation .pin-dot span { display: none; }
+
+/* #7: static red ring highlight (from "All Hotspots" list) */
+.pin.pin-highlight::before {
+  content: '';
+  position: absolute;
+  left: 50%; top: 0;
+  width: 46px; height: 46px;
+  transform: translate(-50%, -8px);
+  border: 3px solid #ff3b30;
+  border-radius: 50%;
+  box-shadow: 0 0 8px rgba(255,59,48,0.7);
+  pointer-events: none;
+}
+/* #9: pulsing/breathing ring highlight (from Search "Locate") */
+.pin.pin-locate::before {
+  content: '';
+  position: absolute;
+  left: 50%; top: 0;
+  width: 46px; height: 46px;
+  transform: translate(-50%, -8px);
+  border: 3px solid #ff3b30;
+  border-radius: 50%;
+  pointer-events: none;
+  animation: locatePulse 1.1s ease-out infinite;
+}
+@keyframes locatePulse {
+  0%   { box-shadow: 0 0 0 0 rgba(255,59,48,0.55); opacity: 1; }
+  70%  { box-shadow: 0 0 0 18px rgba(255,59,48,0); opacity: 0.9; }
+  100% { box-shadow: 0 0 0 0 rgba(255,59,48,0); opacity: 1; }
+}
+
+/* Locate spotlight: dim the whole canvas (all page images + all other pins) for a few
+   seconds so the searched marker stands out, then everything fades back to normal. */
+.location-viewer .page-block > img.cover-img { transition: filter 0.4s ease; }
+.location-viewer .pin { transition: opacity 0.4s ease; }
+.location-viewer.spotlight .page-block > img.cover-img { filter: brightness(0.4); }
+.location-viewer.spotlight .pin { opacity: 0.25; }
+.location-viewer.spotlight .pin.spotlight-target {
+  opacity: 1;
+  z-index: 40;
+}
+.location-viewer.spotlight .pin.spotlight-target .pin-dot {
+  box-shadow: 0 0 0 3px rgba(255,255,255,0.9), 0 0 16px 6px rgba(255,59,48,0.85);
+}
+
+.no-photo-placeholder {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-dim);
+  padding: 24px;
+  text-align: center;
+}
+
+.location-toolbar {
+  position: absolute;
+  bottom: calc(14px + var(--safe-bottom));
+  left: 0; right: 0;
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 0 12px;
+  z-index: 15;
+  pointer-events: none;
+}
+.location-toolbar > * { pointer-events: auto; }
+
+/* Mobile: lay the four controls out as a compact 2×2 grid inside one rounded panel — row 1
+   = Add box + Relocate, row 2 = Layout + Photos — so nothing wraps oddly or gets clipped by
+   sideways scrolling. Each cell fills its half evenly and is a comfortable tap target. */
+@media (max-width: 560px) {
+  .location-toolbar {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    padding: 8px;
+    margin: 0 auto;
+    left: 10px; right: 10px;
+    width: auto;
+    max-width: 360px;
+    background: rgba(0,0,0,0.6);
+    border-radius: 18px;
+    box-shadow: 0 3px 14px rgba(0,0,0,0.45);
+  }
+  .location-toolbar .toggle-btn,
+  .location-toolbar .btn.small {
+    width: 100%;
+    justify-content: center;
+    background: rgba(255,255,255,0.08);
+    color: #fff;                 /* white text on the dark toolbar (the "+ Photo" label) */
+    border-color: transparent;
+    box-shadow: none;
+    padding: 10px 8px;
+    gap: 8px;
+    font-size: 14px;
+    min-height: 44px;
+  }
+  .location-toolbar .toggle-track { width: 34px; height: 20px; }
+  .location-toolbar .toggle-knob { width: 16px; height: 16px; }
+  .location-toolbar .toggle-btn.on .toggle-knob { transform: translateX(14px); }
+}
+
+/* Enable/disable "Add" toggle switch in the location toolbar */
+.toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  background: rgba(0,0,0,0.6);
+  color: #fff;
+  border: none;
+  padding: 8px 16px 8px 10px;
+  border-radius: 24px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+}
+.toggle-track {
+  width: 40px; height: 23px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.28);
+  position: relative;
+  transition: background 0.2s ease;
+  flex-shrink: 0;
+}
+.toggle-knob {
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 19px; height: 19px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.2s ease;
+}
+.toggle-btn.on .toggle-track { background: var(--accent); }
+.toggle-btn.on .toggle-knob { transform: translateX(17px); }
+.btn.small { padding: 9px 16px; font-size: 14px; min-height: 40px; }
+
+.add-hint {
+  position: absolute;
+  top: calc(10px + var(--safe-top));
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--accent);
+  color: #fff;
+  padding: 7px 16px;
+  border-radius: 18px;
+  font-size: 13px;
+  font-weight: 600;
+  z-index: 15;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.4);
+  animation: fadeInDown 0.2s ease;
+  white-space: nowrap;
+}
+.location-viewer.add-mode { cursor: crosshair; }
+.location-viewer.relocate-mode .pin { cursor: move; }
+
+/* #7: compact relocate D-pad — a single round pad split into 4 arc/quadrant segments that
+   touch each other (classic phone D-pad), with a small hub. Sits at the bottom of the
+   screen with a clear gap, never overlapping the (centred) marker. Buttons are modest size,
+   merged together — not bulky separate circles. */
+.nudge-pad-circle {
+  position: fixed;
+  left: 50%;
+  bottom: calc(84px + var(--safe-bottom));
+  transform: translateX(-50%);
+  width: 112px;
+  height: 112px;
+  border-radius: 50%;
+  z-index: 30;
+  box-shadow: 0 5px 18px rgba(0,0,0,0.5);
+  animation: sheetPop 0.16s ease;
+  touch-action: none;
+  overflow: hidden;
+  background: rgba(0,0,0,0.35);
+}
+/* Each direction is a half-overlapping quadrant clipped to a wedge that meets at centre. */
+.nudge-pad-circle .nudge-btn {
+  position: absolute;
+  width: 56px; height: 56px;
+  border: none;
+  background: rgba(30,34,40,0.82);
+  color: #fff;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.nudge-pad-circle .nudge-btn.up    { top: 0; left: 28px; align-items: flex-start; padding-top: 6px; clip-path: polygon(50% 100%, 0 0, 100% 0); }
+.nudge-pad-circle .nudge-btn.down  { bottom: 0; left: 28px; align-items: flex-end; padding-bottom: 6px; clip-path: polygon(50% 0, 0 100%, 100% 100%); }
+.nudge-pad-circle .nudge-btn.left  { left: 0; top: 28px; justify-content: flex-start; padding-left: 6px; clip-path: polygon(0 50%, 100% 0, 100% 100%); }
+.nudge-pad-circle .nudge-btn.right { right: 0; top: 28px; justify-content: flex-end; padding-right: 6px; clip-path: polygon(100% 50%, 0 0, 0 100%); }
+.nudge-pad-circle .nudge-btn:active { background: var(--accent); }
+.nudge-pad-circle .nudge-hub {
+  position: absolute;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.6);
+  color: #fff;
+  opacity: 0.75;
+  font-size: 14px;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;
+}
+
+/* Read-only hotspot card (search view) */
+.view-row {
+  display: flex;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 15px;
+  align-items: baseline;
+}
+.view-row.col { flex-direction: column; gap: 4px; }
+.view-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  min-width: 78px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.detail-popup .view-val { color: var(--text); white-space: pre-wrap; word-break: break-word; }
+.type-badge {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+.type-badge.anno { background: rgba(255,200,60,0.25); color: #8a6400; }
+.type-badge.box { background: rgba(74,158,255,0.2); color: #1a5fa8; }
+:root[data-theme="dark"] .type-badge.anno { color: #f0c04a; }
+:root[data-theme="dark"] .type-badge.box { color: #7db8ff; }
+
+/* Read-only view header with single Close (✕) — #2 */
+.view-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.detail-popup .view-close { color: var(--text); }
+
+/* Action buttons pinned to the bottom of the sheet so they stay in view (keyboard-safe),
+   with a solid backdrop and a top divider so the content scrolling underneath reads as
+   "behind the bar", not hidden by it. The sheet gets bottom padding equal to the bar so the
+   LAST real item (e.g. the photo grid / Add Photos button) always fully clears the bar and is
+   never trapped behind it. */
+.modal-sheet .btn-row {
+  position: sticky;
+  bottom: 0;
+  /* Full-bleed to the sheet edges (cancel the sheet's 18px side/bottom padding) so the bar's
+     backdrop covers edge to edge and the last content clears it. */
+  margin: 12px -18px calc(-18px - var(--safe-bottom));
+  padding: 12px 18px calc(12px + var(--safe-bottom));
+  background: var(--bg-elevated);
+  border-top: 1px solid var(--border);
+  z-index: 2;
+}
+.modal-overlay.detail-popup .modal-sheet .btn-row { background: var(--bg-elevated); }
+/* Reserve room so nothing is trapped behind the sticky bar. */
+.modal-sheet { scroll-padding-bottom: 84px; }
+
+/* Action buttons at the bottom of a form/sheet: comfortable, mobile-first tap targets that
+   sit BELOW the fields (never over them). The sheet's own .btn-row is sticky-bottom (defined
+   later), so these just size the buttons. */
+.modal-sheet .btn-row .btn {
+  flex: 1;
+  min-height: 50px;
+  font-size: 15px;
+}
+
+/* Smooth entrance animations */
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes sheetUp { from { transform: translateY(26px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes sheetPop { from { transform: scale(0.96); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes fadeInDown { from { transform: translate(-50%, -8px); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
+
+/* Modal / bottom sheet */
+.modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.6);
+  z-index: 100;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  animation: fadeIn 0.16s ease;
+}
+.modal-overlay.centered { align-items: center; }
+.modal-sheet {
+  background: var(--bg-elevated);
+  width: 100%;
+  max-width: 560px;
+  max-height: 92vh;
+  border-radius: 16px 16px 0 0;
+  overflow-y: auto;
+  padding: 18px;
+  padding-bottom: calc(18px + var(--safe-bottom));
+  animation: sheetUp 0.24s cubic-bezier(0.22,0.61,0.36,1);
+}
+.modal-overlay.centered .modal-sheet { animation: sheetPop 0.2s cubic-bezier(0.22,0.61,0.36,1); }
+.modal-overlay.centered .modal-sheet {
+  border-radius: 16px;
+  max-height: 85vh;
+}
+
+/* Semi-transparent popup used for hotspot/annotation detail view.
+   Theme-aware: it inherits the same surface/text variables as every other sheet, so
+   in dark theme it is dark and in light theme it is light — it must never force white. */
+.modal-overlay.detail-popup {
+  background: rgba(0,0,0,0.5);
+}
+.modal-overlay.detail-popup .modal-sheet {
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+/* the remaining detail-popup rules intentionally inherit the default themed
+   .field / input / .btn styles — no colour overrides needed. */
+.modal-sheet h2 {
+  margin: 0 0 14px;
+  font-size: 18px;
+}
+.field {
+  margin-bottom: 14px;
+}
+.field label {
+  display: block;
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.field input[type=text], .field textarea, .field select {
+  width: 100%;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 11px 12px;
+  border-radius: 10px;
+  font-size: 15px;
+  font-family: inherit;
+}
+.field textarea { min-height: 80px; resize: vertical; }
+
+/* #19: @-mention autocomplete — appears ABOVE the field, scrollable, with a preview line */
+.field { position: relative; }
+.at-suggest {
+  position: absolute;
+  left: 0; right: 0;
+  bottom: 100%;
+  margin-bottom: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+  z-index: 5;
+}
+.at-item { padding: 9px 12px; cursor: pointer; border-bottom: 1px solid var(--border); }
+.at-item:last-child { border-bottom: none; }
+.at-item:active, .at-item:hover { background: var(--bg-card); }
+.at-name { font-weight: 600; font-size: 14px; }
+.at-desc { font-size: 12px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* #18: incoming/outgoing annotation link chips */
+.link-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.link-chip {
+  background: rgba(229,72,72,0.16);
+  color: var(--text);
+  border: 1px solid rgba(229,72,72,0.4);
+  border-radius: 14px;
+  padding: 5px 11px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.link-chip:active { background: rgba(229,72,72,0.3); }
+/* Link rows that also show the target annotation's description */
+.link-list { display: flex; flex-direction: column; gap: 6px; }
+.link-row {
+  text-align: left;
+  background: rgba(229,72,72,0.12);
+  color: var(--text);
+  border: 1px solid rgba(229,72,72,0.35);
+  border-radius: 10px;
+  padding: 8px 11px;
+  cursor: pointer;
+  width: 100%;
+}
+.link-row:active { background: rgba(229,72,72,0.25); }
+.link-row-name { font-weight: 700; font-size: 14px; }
+.link-row-desc { font-size: 12px; color: var(--text-dim); margin-top: 2px; white-space: pre-wrap; word-break: break-word; }
+
+/* Photo grid */
+.photo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+}
+.photo-grid .photo-thumb {
+  position: relative;
+  aspect-ratio: 1;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg-card);
+  cursor: pointer;
+}
+.photo-grid .photo-thumb img {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+}
+.photo-grid .photo-thumb .cap-badge {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  background: rgba(0,0,0,0.6);
+  color: #fff;
+  font-size: 10px;
+  padding: 3px 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Full-size photo viewer */
+.photo-viewer-overlay {
+  position: fixed; inset: 0;
+  background: #000;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+}
+.photo-viewer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: calc(10px + var(--safe-top)) 12px 10px;
+  color: #fff;
+  z-index: 2;
+}
+.photo-viewer-counter {
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+}
+.photo-viewer-viewport {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  touch-action: pan-y;
+}
+.photo-viewer-track {
+  display: flex;
+  height: 100%;
+  will-change: transform;
+}
+.photo-viewer-track .slide {
+  flex: 0 0 auto;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.photo-viewer-track img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+  pointer-events: none;
+}
+.photo-viewer-caption {
+  color: #fff;
+  text-align: center;
+  padding: 10px 16px calc(14px + var(--safe-bottom));
+  font-size: 14px;
+  background: rgba(0,0,0,0.4);
+}
+.photo-viewer-caption .caption-text { min-height: 1.2em; }
+.photo-viewer-caption .caption-input {
+  width: 100%;
+  background: rgba(255,255,255,0.1);
+  border: 1px solid rgba(255,255,255,0.3);
+  color: #fff;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.cam-warn {
+  background: rgba(255,179,0,0.14);
+  border: 1px solid rgba(255,179,0,0.4);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+/* Add-photo chooser: two large tiles (gallery left, camera right) instead of thin bars. */
+.photo-choice-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.photo-choice-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px 12px;
+  min-height: 128px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text);
+  cursor: pointer;
+}
+.photo-choice-tile:active { transform: scale(0.97); }
+.photo-choice-tile.primary { background: var(--accent); color: #fff; border-color: transparent; }
+.photo-choice-tile .pct-icon { font-size: 40px; line-height: 1; }
+.photo-choice-tile .pct-label { font-size: 15px; font-weight: 600; text-align: center; }
+
+/* In-app camera (getUserMedia) with flash */
+.camera-overlay {
+  position: fixed; inset: 0;
+  background: #000;
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.camera-overlay video {
+  width: 100%; height: 100%;
+  object-fit: cover;
+  background: #000;
+}
+.cam-topbar {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: calc(10px + var(--safe-top)) 16px 10px;
+  z-index: 2;
+}
+.cam-btn {
+  background: rgba(0,0,0,0.5);
+  color: #fff;
+  border: none;
+  border-radius: 22px;
+  min-height: 44px;
+  padding: 0 18px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.cam-close { min-width: 44px; padding: 0; border-radius: 50%; font-size: 20px; }
+.cam-flash.active { background: #ffb300; color: #1b1e23; }
+.cam-flash.unavailable, .cam-flash:disabled { opacity: 0.5; }
+.cam-bottombar {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 0 0 calc(28px + var(--safe-bottom));
+  z-index: 2;
+}
+.cam-shutter {
+  width: 74px; height: 74px;
+  border-radius: 50%;
+  background: #fff;
+  border: 5px solid rgba(255,255,255,0.55);
+  box-shadow: 0 2px 12px rgba(0,0,0,0.5);
+  cursor: pointer;
+}
+.cam-shutter:active { transform: scale(0.94); }
+.cam-shutter.busy { opacity: 0.6; }
+
+/* Interactive crop modal */
+.crop-sheet { max-width: 640px; }
+.crop-stage {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  line-height: 0;
+  touch-action: none;
+  user-select: none;
+}
+.crop-img { max-width: 100%; max-height: 60vh; display: block; }
+.crop-box {
+  position: absolute;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 9999px rgba(0,0,0,0.45);
+  cursor: move;
+  touch-action: none;
+}
+.crop-handle {
+  position: absolute;
+  width: 22px; height: 22px;
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+}
+.crop-handle.nw { left: -11px; top: -11px; cursor: nwse-resize; }
+.crop-handle.ne { right: -11px; top: -11px; cursor: nesw-resize; }
+.crop-handle.sw { left: -11px; bottom: -11px; cursor: nesw-resize; }
+.crop-handle.se { right: -11px; bottom: -11px; cursor: nwse-resize; }
+
+/* Inline caption prompt after adding a photo */
+.caption-preview {
+  width: 100%;
+  max-height: 40vh;
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 14px;
+  background: var(--bg-card);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.caption-preview img {
+  max-width: 100%;
+  max-height: 40vh;
+  object-fit: contain;
+  display: block;
+}
+
+/* Add photos flow */
+.add-more-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+/* Search */
+.search-bar {
+  padding: 10px 14px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+}
+.search-bar input {
+  width: 100%;
+  padding: 11px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text);
+  font-size: 15px;
+}
+.search-results { padding: 8px 0; }
+.search-hint {
+  padding: 8px 16px 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 700;
+}
+.search-result-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+.search-result-item .srt-thumb {
+  width: 44px; height: 44px;
+  border-radius: 8px;
+  background: var(--bg-card) center/cover no-repeat;
+  flex-shrink: 0;
+}
+.search-result-item .srt-text { flex: 1; min-width: 0; }
+.search-result-item .srt-text .name { font-weight: 600; font-size: 15px; }
+.search-result-item .srt-text .meta { font-size: 12px; color: var(--text-dim); }
+.search-result-item .locate-btn { flex-shrink: 0; white-space: nowrap; min-height: 36px; padding: 7px 12px; }
+.match-badge {
+  display: inline-block;
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--accent);
+  background: rgba(74,158,255,0.15);
+  border-radius: 8px;
+  padding: 1px 6px;
+  vertical-align: middle;
+}
+/* Matched-photo gallery under a search / all-hotspots result: a grid of the photos whose
+   captions matched the query, each with its caption underneath. */
+.search-result-group { border-bottom: 1px solid var(--border); }
+.search-result-group .search-result-item { border-bottom: none; }
+.match-photo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 8px;
+  padding: 4px 16px 12px 72px;   /* indent under the row's thumbnail column */
+}
+.hotspot-list-item .match-photo-grid,
+.hlt-text .match-photo-grid { padding: 8px 0 2px; }
+.match-photo-cell {
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+.match-photo-cell img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  display: block;
+}
+.match-photo-cell:active { transform: scale(0.98); }
+.match-photo-cap {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 4px 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* All-hotspots expanded captions */
+.hlt-captions { margin-top: 4px; }
+.hlt-cap { font-size: 12px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.icon-btn.on { color: var(--accent); }
+
+/* List/browse mode */
+.hotspot-list {
+  display: flex;
+  flex-direction: column;
+  padding: 8px 0;
+}
+.hotspot-list-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.hotspot-list-item .hlt-thumb {
+  width: 52px; height: 52px;
+  border-radius: 8px;
+  background: var(--bg-card) center/cover no-repeat;
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-dim);
+  font-size: 20px;
+}
+.hotspot-list-item .hlt-text .name { font-weight: 600; font-size: 15px; }
+.hotspot-list-item .hlt-text .meta { font-size: 12px; color: var(--text-dim); }
+
+.section-title {
+  font-size: 13px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 14px 16px 6px;
+}
+
+.toast {
+  position: fixed;
+  bottom: calc(24px + var(--safe-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  background: #2c323b;
+  color: #fff;
+  padding: 10px 18px;
+  border-radius: 10px;
+  font-size: 14px;
+  z-index: 500;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.4);
+  max-width: 90vw;
+  text-align: center;
+}
+
+.file-input-hidden { display: none; }
+
+/* Blocking loading spinner (photo compression, etc.) */
+.spinner-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.55);
+  z-index: 600;
+  display: flex; align-items: center; justify-content: center;
+  animation: fadeIn 0.12s ease;
+}
+.spinner-box {
+  background: var(--bg-elevated);
+  color: var(--text);
+  border-radius: 14px;
+  padding: 22px 26px;
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+  min-width: 150px;
+}
+.spinner {
+  width: 34px; height: 34px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+.spinner-msg { font-size: 14px; font-weight: 600; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.crumb-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+@media (min-width: 700px) {
+  .modal-overlay { align-items: center; }
+  .modal-sheet { border-radius: 16px; max-height: 85vh; }
+}
