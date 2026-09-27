@@ -25,10 +25,12 @@ function blobToUrl(blob) {
   return blob ? URL.createObjectURL(blob) : '';
 }
 
+// Glass toast. Only one at a time — a new toast replaces the previous one instead of stacking.
 function showToast(msg, ms) {
-  const t = el('div', { class: 'toast' }, [msg]);
+  document.querySelectorAll('.toast').forEach(t => t.remove());
+  const t = el('div', { class: 'toast', role: 'status' }, [msg]);
   document.body.appendChild(t);
-  setTimeout(() => t.remove(), ms || 2200);
+  setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 220); }, ms || 2200);
 }
 
 // Blocking, dismiss-proof loading overlay shown during slow work (photo compression).
@@ -94,9 +96,9 @@ function openInAppCamera() {
     const video = el('video', { autoplay: 'true', playsinline: 'true' });
     video.muted = true; video.playsInline = true; // properties (needed for iOS inline autoplay)
     video.setAttribute('playsinline', 'true'); // iOS: play inline, don't go fullscreen native
-    const flashBtn = el('button', { class: 'cam-btn cam-flash', title: 'Flash' }, ['⚡ Flash On']);
+    const flashBtn = el('button', { class: 'cam-btn cam-flash glass', title: 'Flash' });
     const shutter = el('button', { class: 'cam-shutter', title: 'Capture' });
-    const closeBtn = el('button', { class: 'cam-btn cam-close', title: 'Close' }, ['✕']);
+    const closeBtn = el('button', { class: 'cam-btn cam-close glass', title: 'Close' }, [icon('close', 22)]);
 
     function finish(files) {
       if (done) return; done = true;
@@ -104,6 +106,8 @@ function openInAppCamera() {
       overlay.remove();
       resolve(files === 'fallback' ? 'fallback' : (files || []));
     }
+    // Hardware Back closes the camera (popstate removes the node and calls this).
+    overlay.__onClose = () => finish([]);
 
     // Momentarily set the torch on/off (used to pulse the flash at capture time only).
     async function setTorch(on) {
@@ -113,10 +117,16 @@ function openInAppCamera() {
     }
 
     function updateFlashBtn() {
-      if (!torchSupported) { flashBtn.textContent = '⚡ No flash'; flashBtn.disabled = true; flashBtn.classList.add('unavailable'); return; }
-      flashBtn.textContent = flashMode ? '⚡ Flash On' : '⚡ Flash Off';
+      flashBtn.innerHTML = '';
+      if (!torchSupported) {
+        flashBtn.append(icon('flashOff', 18), 'No flash');
+        flashBtn.disabled = true; flashBtn.classList.add('unavailable');
+        return;
+      }
+      flashBtn.append(icon(flashMode ? 'flash' : 'flashOff', 18), flashMode ? 'Flash on' : 'Flash off');
       flashBtn.classList.toggle('active', flashMode);
     }
+    updateFlashBtn();
 
     async function start() {
       try {
@@ -195,7 +205,7 @@ function openInAppCamera() {
     overlay.appendChild(video);
     overlay.appendChild(el('div', { class: 'cam-topbar' }, [closeBtn, flashBtn]));
     overlay.appendChild(el('div', { class: 'cam-bottombar' }, [shutter]));
-    document.body.appendChild(overlay);
+    showOverlay(overlay, { onBackdrop: false });
     start();
   });
 }
@@ -214,14 +224,16 @@ function pickImageWithChoice({ multiple } = {}) {
     // Two big tap tiles. "Take photo" is placed on the RIGHT (thumb-friendly for right-hand
     // use); "Choose from gallery" on the left.
     const galleryTile = el('button', { class: 'photo-choice-tile', onclick: () => via('gallery') }, [
-      el('div', { class: 'pct-icon' }, ['🖼️']),
+      el('div', { class: 'pct-icon' }, [icon('images', 30)]),
       el('div', { class: 'pct-label' }, ['Choose from gallery'])
     ]);
     const cameraTile = el('button', { class: 'photo-choice-tile primary', onclick: () => via('camera') }, [
-      el('div', { class: 'pct-icon' }, ['📷']),
+      el('div', { class: 'pct-icon' }, [icon('camera', 30)]),
       el('div', { class: 'pct-label' }, ['Take photo'])
     ]);
+    overlay.__onClose = () => { if (!done) { done = true; resolve([]); } };
     const sheet = el('div', { class: 'modal-sheet' }, [
+      el('div', { class: 'sheet-grabber' }),
       el('h2', {}, ['Add photo']),
       el('div', { class: 'photo-choice-grid' }, [galleryTile, cameraTile]),
       el('div', { class: 'btn-row', style: 'margin-top:14px;' }, [

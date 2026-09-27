@@ -1,19 +1,57 @@
 let lvState = null; // per-location-view transient state
 // Modes persist across in-place re-renders (e.g. after a layout rotate/front/back) so a
 // toggle the user turned ON stays ON until they turn it OFF. Reset when the location changes.
-let lvModes = { locationId: null, addMode: false, relocateMode: false, layoutMode: false };
+let lvModes = { locationId: null, addMode: false, relocateMode: false, layoutMode: false, pasteMode: false, sceneId: null };
 // The zoom/pan the user has set persists across in-place re-renders (e.g. after saving a
 // hotspot) so the canvas doesn't snap back to the fit-everything view. Reset per location.
 let lvViewport = { locationId: null, scale: 0, tx: 0, ty: 0 };
+// The 360° viewer survives in-place re-renders (no texture re-upload, no flicker, same view
+// direction). views[pageId] remembers where the user was looking in each scene.
+let panoCache = { pageId: null, viewer: null, views: {} };
+
+function isPanoPage(p) { return !!p && p.kind === 'pano'; }
+
+function destroyPanoCache() {
+  if (panoCache.viewer) panoCache.viewer.destroy();
+  panoCache.viewer = null;
+  panoCache.pageId = null;
+}
 
 async function renderLocationView() {
+  const seq = renderSeq;
   hideNudgePad(); // drop any stale relocate pad from a previous render
   const loc = await DB.getLocation(state.locationId);
-  if (!loc) { goHome(); return; }
+  if (seq !== renderSeq) return;
+  if (!loc) { destroyPanoCache(); goHome(); return; }
 
   if (lvModes.locationId !== loc.id) {
-    lvModes = { locationId: loc.id, addMode: false, relocateMode: false, layoutMode: false };
+    lvModes = { locationId: loc.id, addMode: false, relocateMode: false, layoutMode: false, pasteMode: false, sceneId: null };
+    panoCache.views = {};
+    destroyPanoCache();
   }
+
+  // Load pages (v3). Older data was migrated so there is always ≥1 page unless the
+  // location was created with no photo yet. 360° scenes are pages with kind 'pano'.
+  const pages = await DB.getPagesForLocation(loc.id);
+  const hotspots = await DB.getHotspotsForLocation(loc.id);
+  if (seq !== renderSeq) return;
+  const panoPages = pages.filter(isPanoPage), flatPages = pages.filter(p => !isPanoPage(p));
+  const scenes = panoPages.map((p, i) => ({ id: p.id, kind: 'pano', page: p, name: p.name || `Scene ${i + 1}` }));
+  if (flatPages.length) scenes.push({ id: 'flat', kind: 'flat', name: panoPages.length ? 'Photos' : 'Photo' });
+
+  // A pending Locate for this location opens the scene that holds the target.
+  if (pendingLocate && pendingLocate.locationId === loc.id) {
+    const target = hotspots.find(h => h.id === pendingLocate.hotspotId);
+    if (target) {
+      const s = scenes.find(sc => sc.kind === 'pano' ? sc.id === target.pageId : !panoPages.some(p => p.id === target.pageId));
+      if (s) lvModes.sceneId = s.id;
+    }
+  }
+  const scene = scenes.find(s => s.id === lvModes.sceneId) || scenes[0] || null;
+  lvModes.sceneId = scene ? scene.id : null;
+  if (!scene || scene.kind !== 'pano' || panoCache.pageId !== scene.id) destroyPanoCache();
+  if (lvModes.layoutMode && (!scene || scene.kind !== 'flat')) lvModes.layoutMode = false;
+  if (lvModes.pasteMode && !getClipboard()) lvModes.pasteMode = false;
 
   lvState = {
     scale: 1, tx: 0, ty: 0,
@@ -22,65 +60,327 @@ async function renderLocationView() {
     addMode: lvModes.addMode,
     relocateMode: lvModes.relocateMode,
     layoutMode: lvModes.layoutMode,  // when ON, drag whole pages to reposition them
+    pasteMode: lvModes.pasteMode,    // when ON, the next tap places the copied hotspot
     highlightAnno: false,            // #16 highlight-all-annotations dim mode
-    pages: [],                       // [{ page, block, img, pinLayer, w, h }]
-    loc
+    pages: [],                       // [{ page, block, img, pinLayer, w, h }] or one pano entry
+    mode: scene ? scene.kind : null, // 'pano' | 'flat'
+    scene, loc
   };
 
   const isAnno = lvState.markerType === 'annotation';
+  const itemWord = isAnno ? 'annotation' : 'box';
+  const count = hotspots.length;
 
-  const topbar = el('div', { class: 'topbar' }, [
-    el('button', { class: 'icon-btn', onclick: () => history.back() }, ['←']),
-    el('h1', {}, [loc.name]),
+  const topbar = el('header', { class: 'topbar glass-bar floating' }, [
+    el('button', { class: 'icon-btn round', title: 'Back', onclick: () => history.back() }, [icon('back')]),
+    el('div', { class: 'tb-title' }, [
+      el('h1', {}, [loc.name]),
+      el('div', { class: 'tb-sub' }, [`${count} ${itemWord}${count === 1 ? '' : (isAnno ? 's' : 'es')}` + (scene && scene.kind === 'pano' ? ' · 360°' : '')])
+    ]),
     // #16: annotation-only — highlight all annotations (dim the diagram behind them).
-    isAnno ? el('button', { class: 'icon-btn', title: 'Highlight annotations', onclick: () => toggleAnnoHighlight() }, ['💡']) : null,
-    el('button', { class: 'icon-btn', title: 'Search hotspots', onclick: () => toggleBrowse(loc) }, ['🔍']),
-    el('button', { class: 'icon-btn', title: 'Export Excel', onclick: () => exportLocationExcel(loc) }, ['📊']),
-    el('button', { class: 'icon-btn', title: 'Edit Location', onclick: () => openEditLocationModal(loc) }, ['✏️'])
+    isAnno ? el('button', { class: 'icon-btn round', title: 'Highlight annotations', onclick: () => toggleAnnoHighlight() }, [icon('bulb')]) : null,
+    el('button', { class: 'icon-btn round', title: 'Search in this location', onclick: () => toggleBrowse(loc) }, [icon('search')]),
+    el('button', { class: 'icon-btn round', title: 'Export Excel', onclick: () => exportLocationExcel(loc) }, [icon('sheet')]),
+    el('button', { class: 'icon-btn round', title: 'Edit location', onclick: () => openEditLocationModal(loc) }, [icon('edit')])
   ]);
   root.appendChild(topbar);
 
-  const viewWrap = el('div', { class: 'view', style: 'padding:0;overflow:hidden;' });
+  const viewWrap = el('div', { class: 'view location-wrap' });
   root.appendChild(viewWrap);
 
-  // Load pages (v3). Older data was migrated so there is always ≥1 page unless the
-  // location was created with no photo yet.
-  let pages = await DB.getPagesForLocation(loc.id);
-
-  if (!pages.length) {
+  if (!scene) {
     viewWrap.appendChild(el('div', { class: 'no-photo-placeholder' }, [
-      el('div', { style: 'font-size:40px;' }, ['📷']),
-      el('div', {}, ['No photo yet. Add a photo of this location to start tagging.']),
-      el('button', {
-        class: 'btn', onclick: async () => {
-          const files = await pickImageWithChoice();
-          if (files[0]) {
-            const file = files[0];
-            // Instant: store the original, compress+swap in the background.
-            const pg = await addPhotoInstant(file, {
-              save: (blob) => DB.addPage({ locationId: loc.id, photo: blob, order: 0 }),
-              replace: (rec, small) => { rec.photo = small; return DB.updatePage(rec); },
-              maxDim: 1600, quality: 0.82
-            });
-            if (!loc.coverPhoto) {
-              loc.coverPhoto = file; await DB.updateLocation(loc); // home thumbnail
-              compressInBackground(file, loc, (l, small) => { l.coverPhoto = small; return DB.updateLocation(l); }, 1600, 0.82);
-            }
-            render();
-          }
-        }
-      }, ['Add Photo'])
+      el('div', { class: 'empty-art' }, [icon('orbit', 40)]),
+      el('div', { class: 'empty-title' }, ['No photo of this location yet']),
+      el('div', { class: 'empty-text' }, ['Capture it as a 360° photo to see the whole room at once, or add a regular photo.']),
+      el('div', { class: 'stack-btns' }, [
+        el('button', { class: 'btn', onclick: () => addPanoScene(loc, 'capture') }, [icon('orbit', 20), 'Capture 360°']),
+        el('button', { class: 'btn secondary', onclick: () => addPanoScene(loc, 'import') }, [icon('upload', 20), 'Import 360° photo']),
+        el('button', { class: 'btn secondary', onclick: () => addPageFlow(loc) }, [icon('image', 20), 'Add regular photo'])
+      ])
     ]));
     return;
   }
 
-  const viewer = el('div', { class: 'location-viewer' });
+  const viewer = el('div', { class: 'location-viewer' + (scene.kind === 'pano' ? ' is-pano' : '') });
   viewWrap.appendChild(viewer);
+  lvState.viewer = viewer;
+
+  // Scene switcher — shown whenever the location has a 360° scene.
+  if (panoPages.length) {
+    const bar = el('div', { class: 'scene-bar' });
+    scenes.forEach(s => {
+      const on = s.id === scene.id;
+      bar.appendChild(el('button', {
+        class: 'scene-chip' + (on ? ' on' : ''),
+        onclick: () => {
+          if (on) { if (s.kind === 'pano') openSceneMenu(loc, s.page); return; }
+          lvModes.sceneId = s.id;
+          lvModes.layoutMode = false;
+          render();
+        }
+      }, [icon(s.kind === 'pano' ? 'pano' : 'images', 15), el('span', {}, [s.name]), on && s.kind === 'pano' ? icon('chevronDown', 14) : null]));
+    });
+    bar.appendChild(el('button', { class: 'scene-chip add', title: 'Add a scene or photo', onclick: () => openAddMediaSheet(loc) }, [icon('plus', 16)]));
+    viewer.appendChild(bar);
+  }
+
+  if (scene.kind === 'pano') await renderPanoScene(loc, scene.page, viewer);
+  else await renderFlatScene(loc, flatPages, viewer);
+  if (seq !== renderSeq) return;
+
+  // Mode hint banner (what a tap will do right now) with a Done button.
+  const hintText = el('span', { class: 'mh-text' });
+  const hint = el('div', { class: 'mode-hint glass' }, [
+    el('span', { class: 'mh-dot' }), hintText,
+    el('button', { class: 'mh-done', onclick: () => setMode(null) }, ['Done'])
+  ]);
+  viewer.appendChild(hint);
+  lvState.hint = hint;
+
+  // ---- Floating dock ----
+  const clip = getClipboard();
+  const dockBtn = (key, ic, label, onclick) => el('button', { class: 'dock-btn', 'data-key': key, title: label, onclick }, [
+    el('span', { class: 'dock-ico' }, [icon(ic, 22)]), el('span', { class: 'dock-label' }, [label])
+  ]);
+  const btns = [
+    dockBtn('add', isAnno ? 'dot' : 'pinAdd', isAnno ? 'Add dot' : 'Add box', () => setMode('add')),
+    dockBtn('relocate', 'move', 'Move', () => setMode('relocate'))
+  ];
+  if (scene.kind === 'flat') btns.push(dockBtn('layout', 'layout', 'Arrange', () => setMode('layout')));
+  if (scene.kind === 'pano' && PanoViewer.gyroAvailable()) {
+    btns.push(dockBtn('look', 'compass', 'Look', async () => {
+      const pv = lvState.pano;
+      if (!pv) return;
+      const ok = await pv.setGyro(!pv.gyro);
+      if (!ok && !pv.gyro && lvState.pano === pv) { /* turned off, or permission refused */ }
+      refreshModes();
+      if (pv.gyro) showToast('Move your phone to look around');
+    }));
+  }
+  if (clip) {
+    const b = dockBtn('paste', 'paste', 'Paste', () => setMode('paste'));
+    b.classList.add('has-clip');
+    btns.push(b);
+  }
+  btns.push(dockBtn('media', 'plus', scene.kind === 'pano' ? 'Scene' : 'Photo', () => openAddMediaSheet(loc)));
+  const dock = el('nav', { class: 'dock glass' }, btns);
+  viewer.appendChild(dock);
+  lvState.dock = dock;
+
+  function hintFor() {
+    if (lvState.layoutMode) return 'Drag photos to arrange · two fingers rotate & resize';
+    if (lvState.relocateMode) return 'Drag a marker, or tap it for fine arrows';
+    if (lvState.pasteMode) { const c = getClipboard(); return `Tap where “${clipLabel(c)}” should go`; }
+    if (lvState.addMode) return scene.kind === 'pano' ? `Tap anywhere in the 360° view to add a ${itemWord}` : (isAnno ? 'Tap the image to add a dot' : 'Tap the photo to add a box');
+    return '';
+  }
+  function refreshModes() {
+    const active = lvState.addMode ? 'add' : lvState.relocateMode ? 'relocate' : lvState.layoutMode ? 'layout' : lvState.pasteMode ? 'paste' : null;
+    dock.querySelectorAll('.dock-btn').forEach(b => {
+      const k = b.dataset.key;
+      b.classList.toggle('on', k === active || (k === 'look' && !!(lvState.pano && lvState.pano.gyro)));
+    });
+    viewer.classList.toggle('add-mode', lvState.addMode || lvState.pasteMode);
+    viewer.classList.toggle('relocate-mode', lvState.relocateMode);
+    viewer.classList.toggle('layout-mode', lvState.layoutMode);
+    const t = hintFor();
+    hintText.textContent = t;
+    hint.classList.toggle('show', !!t);
+    // Persist the current modes so an in-place render() (e.g. after a layout rotate) keeps
+    // whatever the user had toggled on.
+    lvModes.addMode = lvState.addMode;
+    lvModes.relocateMode = lvState.relocateMode;
+    lvModes.layoutMode = lvState.layoutMode;
+    lvModes.pasteMode = lvState.pasteMode;
+  }
+  lvState.refreshToggle = refreshModes;
+  refreshModes();
+}
+
+// Switch the one active editing mode ('add' | 'relocate' | 'layout' | 'paste'); tapping the
+// active one again (or null) turns everything off.
+function setMode(name) {
+  if (!lvState) return;
+  const on = name && !lvState[name + 'Mode'];
+  lvState.addMode = lvState.relocateMode = lvState.layoutMode = lvState.pasteMode = false;
+  if (on) lvState[name + 'Mode'] = true;
+  hideNudgePad();
+  if (lvState.refreshToggle) lvState.refreshToggle();
+}
+
+// ============================================================ 360° scene
+async function renderPanoScene(loc, page, viewer) {
+  const seq = renderSeq;
+  const meta = page.pano || {};
+  let pv = panoCache.viewer && panoCache.pageId === page.id && !panoCache.viewer.destroyed ? panoCache.viewer : null;
+  if (!pv) {
+    destroyPanoCache();
+    const saved = panoCache.views[page.id];
+    pv = new PanoViewer({
+      start: saved || { yaw: meta.startYaw || 0, pitch: meta.startPitch || 0, fov: meta.startFov || undefined },
+      limits: meta.limits || null
+    });
+    panoCache.viewer = pv; panoCache.pageId = page.id;
+    pv.load(page.photo).catch(err => console.error('360 load failed', err));
+    maybeShowPanoCoach(viewer);
+  }
+  pv.opts.isTapMode = () => !!(lvState && (lvState.addMode || lvState.pasteMode));
+  pv.opts.onViewChange = (v) => { panoCache.views[page.id] = v; };
+  viewer.appendChild(pv.el);
+  pv._resize();
+
+  const entry = makePanoEntry(page, pv);
+  lvState.pages = [entry];
+  lvState.pano = pv;
+  pv.opts.onTap = (lon, lat) => {
+    if (!lvState || lvState.relocateMode || lvState.layoutMode) return;
+    const p = PanoMath.pctFromLonLat(lon, lat);
+    if (lvState.pasteMode) { handlePasteAt(loc, page.id, p.x, p.y); return; }
+    if (lvState.addMode) handleTapCreate(loc, page.id, p.x, p.y, entry);
+  };
+  pv.opts.onLoad = () => {
+    entry.__sampleCanvas = pv.sampleCanvas;
+    pv.pins.forEach(p => { if (p.el.__h) applyAdaptivePinColor(p.el, p.el.__h, entry); });
+  };
+  if (pv.sampleCanvas) entry.__sampleCanvas = pv.sampleCanvas;
+  await loadPagePins(loc, entry);
+  if (seq !== renderSeq) return;
+}
+
+function makePanoEntry(page, pv) {
+  return {
+    kind: 'pano', page, viewer: pv, pinLayer: pv.pinLayer, w: 0, h: 0,
+    place(pin, h) {
+      const ll = PanoMath.lonLatFromPct(h.x, h.y);
+      if (pin.__panoAdded) pv.movePin(pin, ll.lon, ll.lat);
+      else { pv.addPin(pin, ll.lon, ll.lat); pin.__panoAdded = true; }
+    },
+    fromScreen(clientX, clientY) {
+      const ll = pv.lonLatAtClient(clientX, clientY);
+      return PanoMath.pctFromLonLat(ll.lon, ll.lat);
+    }
+  };
+}
+
+function maybeShowPanoCoach(viewer) {
+  let n = 0;
+  try { n = +(localStorage.getItem('vi-pano-coach') || 0); localStorage.setItem('vi-pano-coach', String(n + 1)); } catch (e) {}
+  if (n >= 3) return;
+  const coach = el('div', { class: 'pano-coach glass' }, [icon('orbit', 22), el('span', {}, ['Drag to look around · pinch to zoom'])]);
+  viewer.appendChild(coach);
+  setTimeout(() => coach.classList.add('out'), 2600);
+  setTimeout(() => coach.remove(), 3200);
+}
+
+// Scene options for a 360° scene (tap the active scene chip).
+function openSceneMenu(loc, page) {
+  const overlay = el('div', { class: 'modal-overlay' });
+  const pv = lvState && lvState.pano;
+  overlay.appendChild(el('div', { class: 'modal-sheet' }, [
+    el('div', { class: 'sheet-grabber' }),
+    el('h2', {}, [page.name || '360° scene']),
+    el('div', { class: 'menu-group' }, [
+      menuItem('edit', 'Rename scene', async () => {
+        const name = prompt('Scene name:', page.name || '');
+        overlay.remove();
+        if (name == null) return;
+        page.name = name.trim() || page.name;
+        await DB.updatePage(page);
+        render();
+      }),
+      pv ? menuItem('target', 'Start here', async () => {
+        overlay.remove();
+        page.pano = Object.assign({}, page.pano, { startYaw: pv.yaw, startPitch: pv.pitch, startFov: pv.fov });
+        await DB.updatePage(page);
+        showToast('This view now opens first');
+      }, { sub: 'Open this scene looking where you are looking now' }) : null,
+      pv ? menuItem('image', 'Use this view as cover', async () => {
+        overlay.remove();
+        const sp = showSpinner('Updating cover…');
+        try {
+          const cover = await PanoStitch.renderPerspective(page.photo, { yaw: pv.yaw, pitch: pv.pitch, hfov: 90, width: 640, height: 480 });
+          const fresh = await DB.getLocation(loc.id);
+          fresh.coverPhoto = cover;
+          await DB.updateLocation(fresh);
+          showToast('Cover updated');
+        } catch (e) { showToast('Could not update the cover'); } finally { sp.remove(); }
+      }, { sub: 'Shown on the home screen tile' }) : null,
+      menuItem('trash', 'Delete scene', async () => {
+        overlay.remove();
+        const n = (await DB.getHotspotsForPage(page.id)).length;
+        if (!confirm(`Delete this 360° scene${n ? ` and the ${n} marker${n === 1 ? '' : 's'} on it` : ''}?`)) return;
+        await DB.deletePage(page.id);
+        await syncPanoCount(loc.id);
+        lvModes.sceneId = null;
+        destroyPanoCache();
+        render();
+        showToast('Scene deleted');
+      }, { danger: true })
+    ].filter(Boolean)),
+    el('div', { class: 'btn-row' }, [el('button', { class: 'btn secondary', onclick: () => overlay.remove() }, ['Close'])])
+  ]));
+  showOverlay(overlay);
+}
+
+async function syncPanoCount(locationId) {
+  const loc = await DB.getLocation(locationId);
+  if (!loc) return;
+  loc.panoCount = (await DB.getPagesForLocation(locationId)).filter(isPanoPage).length;
+  await DB.updateLocation(loc);
+}
+
+// "Add" sheet: new 360° scene (capture / import) or regular photo(s).
+function openAddMediaSheet(loc) {
+  const overlay = el('div', { class: 'modal-overlay' });
+  overlay.appendChild(el('div', { class: 'modal-sheet' }, [
+    el('div', { class: 'sheet-grabber' }),
+    el('h2', {}, ['Add to this location']),
+    el('div', { class: 'menu-group' }, [
+      menuItem('orbit', 'Capture 360° scene', () => { overlay.remove(); addPanoScene(loc, 'capture'); }, { sub: 'Turn on the spot — photos are taken automatically' }),
+      menuItem('pano', 'Import 360° photo', () => { overlay.remove(); addPanoScene(loc, 'import'); }, { sub: 'From a 360° camera, Photo Sphere or phone panorama' }),
+      menuItem('images', 'Regular photo(s)', () => { overlay.remove(); addPageFlow(loc); }, { sub: 'Add to the flat photo layout' })
+    ]),
+    el('div', { class: 'btn-row' }, [el('button', { class: 'btn secondary', onclick: () => overlay.remove() }, ['Cancel'])])
+  ]));
+  showOverlay(overlay);
+}
+
+async function addPanoScene(loc, mode) {
+  const res = await obtainPanorama(mode);
+  if (!res) return;
+  if (res.flat) {
+    showToast('That photo isn\'t a panorama — added as a regular photo');
+    await addFlatFiles(loc, [res.file]);
+    lvModes.sceneId = 'flat';
+    render();
+    return;
+  }
+  try {
+    const pages = await DB.getPagesForLocation(loc.id);
+    const n = pages.filter(isPanoPage).length;
+    const page = await DB.addPage({ locationId: loc.id, kind: 'pano', photo: res.blob, pano: res.meta, name: `Scene ${n + 1}`, order: pages.length });
+    const fresh = await DB.getLocation(loc.id);
+    fresh.panoCount = n + 1;
+    if (!fresh.coverPhoto || !n) {
+      try { fresh.coverPhoto = await PanoStitch.renderPerspective(res.blob, { yaw: res.meta.startYaw || 0, hfov: 90, width: 640, height: 480 }); } catch (e) {}
+    }
+    await DB.updateLocation(fresh);
+    lvModes.sceneId = page.id;
+    render();
+    showToast('360° scene added');
+  } catch (err) {
+    console.error('Save 360 failed', err);
+    showToast('Could not save the 360° photo — storage may be full');
+  }
+}
+
+// ============================================================ flat photo layout
+async function renderFlatScene(loc, pages, viewer) {
   const stage = el('div', { class: 'stage stage-multi' });
   viewer.appendChild(stage);
-
-  lvState.viewer = viewer;
   lvState.stage = stage;
+  lvState.mode = 'flat';
 
   // Build a positioned block per page, load each image, then set the view. On the FIRST open
   // of a location we fit the whole canvas; on an in-place re-render (e.g. after saving a
@@ -100,61 +400,14 @@ async function renderLocationView() {
   // Viewer-level zoom/pan + tap-to-create. On tap we work out which page was hit and the
   // tap's % within that page's image.
   setupZoomPan(viewer, stage, null, () => {}, (clientX, clientY, targetEl) => {
-    if (targetEl && targetEl.closest('.pin, .location-toolbar, .nudge-pad-circle, .add-hint')) return;
+    if (targetEl && targetEl.closest('.pin, .dock, .nudge-pad-circle, .mode-hint, .scene-bar')) return;
     if (lvState.layoutMode) return;              // layout mode drags pages, never creates
-    if (!lvState.addMode) return;
+    if (!lvState.addMode && !lvState.pasteMode) return;
     const hit = pageAtPoint(clientX, clientY);
     if (!hit) return;
+    if (lvState.pasteMode) { handlePasteAt(loc, hit.page.id, hit.relX * 100, hit.relY * 100); return; }
     handleTapCreate(loc, hit.page.id, hit.relX * 100, hit.relY * 100, hit.entry);
   });
-
-  const addLabelOn = isAnno ? 'Tap image to add a dot' : 'Tap image to add a box';
-  const hint = el('div', { class: 'add-hint' }, [addLabelOn]);
-  hint.style.display = 'none';
-  viewer.appendChild(hint);
-  lvState.hint = hint;
-  lvState.addLabelOn = addLabelOn;
-
-  // Toggles: Add, Relocate, Layout.
-  const addToggle = makeToggle(isAnno ? 'Add' : 'Add box');
-  const relocateToggle = makeToggle('Relocate');
-  const layoutToggle = makeToggle('Layout');
-
-  function refreshToggle() {
-    addToggle.classList.toggle('on', lvState.addMode);
-    relocateToggle.classList.toggle('on', lvState.relocateMode);
-    layoutToggle.classList.toggle('on', lvState.layoutMode);
-    viewer.classList.toggle('add-mode', lvState.addMode);
-    viewer.classList.toggle('relocate-mode', lvState.relocateMode);
-    viewer.classList.toggle('layout-mode', lvState.layoutMode);
-    hint.style.display = (lvState.addMode || lvState.relocateMode || lvState.layoutMode) ? 'block' : 'none';
-    hint.textContent = lvState.layoutMode ? 'Drag a photo to position it'
-      : lvState.relocateMode ? 'Tap a marker to nudge it, or drag it'
-      : addLabelOn;
-    // Persist the current modes so an in-place render() (e.g. after a layout rotate) keeps
-    // whatever the user had toggled on.
-    lvModes.addMode = lvState.addMode;
-    lvModes.relocateMode = lvState.relocateMode;
-    lvModes.layoutMode = lvState.layoutMode;
-  }
-  lvState.refreshToggle = refreshToggle;
-  addToggle.addEventListener('click', () => { lvState.addMode = !lvState.addMode; if (lvState.addMode) { lvState.relocateMode = lvState.layoutMode = false; } hideNudgePad(); refreshToggle(); });
-  relocateToggle.addEventListener('click', () => { lvState.relocateMode = !lvState.relocateMode; if (lvState.relocateMode) { lvState.addMode = lvState.layoutMode = false; } hideNudgePad(); refreshToggle(); });
-  layoutToggle.addEventListener('click', () => { lvState.layoutMode = !lvState.layoutMode; if (lvState.layoutMode) { lvState.addMode = lvState.relocateMode = false; } hideNudgePad(); refreshToggle(); });
-
-  const toolbar = el('div', { class: 'location-toolbar' }, [
-    addToggle, relocateToggle, layoutToggle,
-    el('button', { class: 'btn secondary small', title: 'Add another photo', onclick: () => addPageFlow(loc) }, ['+ Photo'])
-  ]);
-  viewer.appendChild(toolbar);
-  refreshToggle();
-}
-
-function makeToggle(label) {
-  return el('button', { class: 'toggle-btn' }, [
-    el('span', { class: 'toggle-track' }, [el('span', { class: 'toggle-knob' })]),
-    el('span', { class: 'toggle-label' }, [label])
-  ]);
 }
 
 // Build one .page-block per page positioned at its offset; load images and record sizes.
@@ -176,7 +429,20 @@ async function buildPages(loc, pages, stage) {
     // the photo uniformly about its centre — an alternative to the two-finger pinch.
     ['nw', 'ne', 'sw', 'se'].forEach(c => block.appendChild(el('div', { class: 'page-resize-handle ' + c, 'data-corner': c })));
     stage.appendChild(block);
-    const entry = { page, block, img, pinLayer, w: 0, h: 0 };
+    const entry = {
+      kind: 'flat', page, block, img, pinLayer, w: 0, h: 0,
+      place(pin, h) {
+        if (pin.parentNode !== pinLayer) pinLayer.appendChild(pin);
+        pin.style.left = h.x + '%'; pin.style.top = h.y + '%';
+      },
+      // Pointer position → % of the (possibly rotated/scaled) image, clamped to the image so
+      // a dragged marker stays grabbable even if the finger strays just outside it.
+      fromScreen(clientX, clientY) {
+        const { x: cx, y: cy } = screenToCanvas(clientX, clientY);
+        const raw = canvasPointToPageFractionUnclamped(entry, cx, cy);
+        return { x: Math.max(0, Math.min(100, raw.relX * 100)), y: Math.max(0, Math.min(100, raw.relY * 100)) };
+      }
+    };
     lvState.pages.push(entry);
     img.onload = () => {
       entry.w = img.naturalWidth; entry.h = img.naturalHeight;
@@ -203,6 +469,7 @@ async function buildPages(loc, pages, stage) {
 // stale positions and overlap. Saving all pages keeps the whole layout consistent on reload.
 async function persistAllPages() {
   for (const e of lvState.pages) {
+    if (e.kind !== 'flat') continue;
     try { await DB.updatePage(e.page); } catch (err) { console.error('Save page failed', err); }
   }
 }
@@ -218,6 +485,8 @@ function applyPageTransform(entry) {
   const s = pageScale(entry.page), deg = pageRot(entry.page);
   // transform-origin is the box centre (set in CSS), so scale then rotate about the centre.
   entry.block.style.transform = `scale(${s}) rotate(${deg}deg)`;
+  entry.block.style.setProperty('--page-s', s);
+  entry.block.style.setProperty('--page-r', deg + 'deg');
 }
 
 // The 4 corners of a page's rotated+scaled box in canvas coordinates. Rotation/scale are
@@ -277,17 +546,9 @@ function screenToCanvas(clientX, clientY) {
 // Undo a page's scale+rotation (about its centre) to get the tap's fractional position
 // within the natural (unrotated) image. Returns {relX, relY} in 0..1, or null if outside.
 function canvasPointToPageFraction(entry, cx, cy) {
-  const p = entry.page, w = entry.w, h = entry.h;
-  const centerX = (p.offsetX || 0) + w / 2, centerY = (p.offsetY || 0) + h / 2;
-  const s = pageScale(p), rad = pageRot(p) * Math.PI / 180;
-  // Translate to centre, inverse-rotate, inverse-scale.
-  const dx = cx - centerX, dy = cy - centerY;
-  const cos = Math.cos(-rad), sin = Math.sin(-rad);
-  const rx = (dx * cos - dy * sin) / s;
-  const ry = (dx * sin + dy * cos) / s;
-  const relX = rx / w + 0.5, relY = ry / h + 0.5;
-  if (relX < 0 || relX > 1 || relY < 0 || relY > 1) return null;
-  return { relX, relY };
+  const f = canvasPointToPageFractionUnclamped(entry, cx, cy);
+  if (f.relX < 0 || f.relX > 1 || f.relY < 0 || f.relY > 1) return null;
+  return f;
 }
 // Same as above but never returns null — used while dragging a marker so it stays grabbable
 // even if the finger strays just outside the image; the caller clamps to 0..1.
@@ -295,6 +556,7 @@ function canvasPointToPageFractionUnclamped(entry, cx, cy) {
   const p = entry.page, w = entry.w, h = entry.h;
   const centerX = (p.offsetX || 0) + w / 2, centerY = (p.offsetY || 0) + h / 2;
   const s = pageScale(p), rad = pageRot(p) * Math.PI / 180;
+  // Translate to centre, inverse-rotate, inverse-scale.
   const dx = cx - centerX, dy = cy - centerY;
   const cos = Math.cos(-rad), sin = Math.sin(-rad);
   const rx = (dx * cos - dy * sin) / s;
@@ -413,15 +675,14 @@ function enablePageLayoutDrag(entry) {
 // keep their positions. This complements the two-finger pinch.
 function enableCornerResize(entry) {
   const block = entry.block;
-  // Half-diagonal of the natural image = distance from centre to a corner at scale 1.
   const handles = block.querySelectorAll('.page-resize-handle');
   handles.forEach(handle => {
-    let active = false, baseScale = 1, halfDiag = 1;
+    let active = false, halfDiag = 1;
     handle.addEventListener('pointerdown', (e) => {
       if (!lvState.layoutMode) return;
       e.stopPropagation(); e.preventDefault();
       active = true;
-      baseScale = pageScale(entry.page);
+      // Half-diagonal of the natural image = distance from centre to a corner at scale 1.
       halfDiag = Math.hypot(entry.w, entry.h) / 2 || 1;
       try { handle.setPointerCapture(e.pointerId); } catch (err) {}
       block.classList.add('page-dragging');
@@ -454,10 +715,9 @@ function enableCornerResize(entry) {
 
 // Layout-mode page menu: crop, bring-to-front, send-to-back, reset transform, delete.
 // Rotation & resize are done directly on the photo with a two-finger gesture (no menu item),
-// so any angle is possible — the old fixed "Rotate 90°" item has been removed.
+// so any angle is possible.
 function openPageMenu(entry) {
-  const overlay = el('div', { class: 'modal-overlay centered' });
-  const item = (label, cls, fn) => el('button', { class: 'btn ' + (cls || 'secondary') + ' menu-item', onclick: fn }, [label]);
+  const overlay = el('div', { class: 'modal-overlay' });
 
   async function resetTransform() {
     overlay.remove();
@@ -484,9 +744,11 @@ function openPageMenu(entry) {
   }
   async function del() {
     overlay.remove();
-    if (lvState.pages.length <= 1) { showToast('A location needs at least one photo'); return; }
+    const all = await DB.getPagesForLocation(entry.page.locationId);
+    if (all.length <= 1) { showToast('A location needs at least one photo'); return; }
     if (!confirm('Delete this photo and all hotspots on it?')) return;
     await DB.deletePage(entry.page.id);
+    if (lvState.pages.length <= 1) lvModes.sceneId = null; // last flat photo gone → show a 360° scene
     render();
   }
   function crop() {
@@ -500,14 +762,17 @@ function openPageMenu(entry) {
   }
 
   overlay.appendChild(el('div', { class: 'modal-sheet' }, [
+    el('div', { class: 'sheet-grabber' }),
     el('h2', {}, ['Photo']),
-    el('div', { class: 'section-title', style: 'padding-left:0;padding-top:0;' }, ['Tip: use two fingers on the photo to rotate to any angle and resize.']),
-    item('✂  Crop', 'secondary', crop),
-    item('⬆  Bring to front', 'secondary', bringFront),
-    item('⬇  Send to back', 'secondary', sendBack),
-    item('⟲  Reset rotation & size', 'secondary', resetTransform),
-    item('🗑  Delete photo', 'danger', del),
-    el('div', { class: 'btn-row', style: 'margin-top:12px;' }, [
+    el('p', { class: 'sheet-sub' }, ['Tip: use two fingers on the photo to rotate it to any angle and resize.']),
+    el('div', { class: 'menu-group' }, [
+      menuItem('crop', 'Crop', crop),
+      menuItem('arrowUp', 'Bring to front', bringFront),
+      menuItem('arrowDown', 'Send to back', sendBack),
+      menuItem('restore', 'Reset rotation & size', resetTransform),
+      menuItem('trash', 'Delete photo', del, { danger: true })
+    ]),
+    el('div', { class: 'btn-row' }, [
       el('button', { class: 'btn secondary', onclick: () => overlay.remove() }, ['Cancel'])
     ])
   ]));
@@ -518,13 +783,23 @@ function openPageMenu(entry) {
 async function addPageFlow(loc) {
   const files = await pickImageWithChoice({ multiple: true });
   if (!files.length) return;
-  // Instant add: store each original file straight away and render, then compress each in the
-  // background and swap the stored blob in place. No blocking spinner.
+  await addFlatFiles(loc, files);
+  lvModes.sceneId = 'flat';
+  render();
+}
+
+// Store picked files as flat pages. Instant add: store each original file straight away and
+// render, then compress each in the background and swap the stored blob in place.
+async function addFlatFiles(loc, files) {
   try {
     const existing = await DB.getPagesForLocation(loc.id);
     // Place each new page to the right of the current canvas so nothing overlaps initially.
     let placeX = 0;
-    for (const e of lvState.pages) placeX = Math.max(placeX, (e.page.offsetX || 0) + e.w + 40);
+    if (lvState && lvState.mode === 'flat') {
+      for (const e of lvState.pages) placeX = Math.max(placeX, (e.page.offsetX || 0) + e.w + 40);
+    } else {
+      for (const p of existing) if (!isPanoPage(p)) placeX = Math.max(placeX, (p.offsetX || 0) + 1700);
+    }
     let order = existing.length;
     for (const file of files) {
       const px = placeX;
@@ -535,17 +810,17 @@ async function addPageFlow(loc) {
       });
       placeX += 40; // stagger; real position set in layout mode
     }
-    if (!loc.coverPhoto) {
+    const fresh = await DB.getLocation(loc.id);
+    if (fresh && !fresh.coverPhoto) {
       // Cover: store the original now, compress in the background.
-      loc.coverPhoto = files[0];
-      await DB.updateLocation(loc);
-      compressInBackground(files[0], loc, (l, small) => { l.coverPhoto = small; return DB.updateLocation(l); }, 1600, 0.82);
+      fresh.coverPhoto = files[0];
+      await DB.updateLocation(fresh);
+      compressInBackground(files[0], fresh, (l, small) => { l.coverPhoto = small; return DB.updateLocation(l); }, 1600, 0.82);
     }
   } catch (err) {
     console.error('Add page failed', err);
     showToast('Could not add photo');
   }
-  render();
 }
 
 // Canvas model: the stage has its top-left at (0,0) and size canvasW×canvasH. The transform
@@ -565,6 +840,7 @@ function applyTransform(stage) {
   // translateZ(0) keeps the stage on its own GPU layer so the whole canvas stays painted
   // while panning/zooming — fixes black patches that previously only cleared after a scroll.
   stage.style.transform = `translate3d(${lvState.tx}px, ${lvState.ty}px, 0) scale(${lvState.scale})`;
+  stage.style.setProperty('--stage-s', lvState.scale);
   // Remember the current zoom/pan so an in-place re-render restores it instead of refitting.
   if (lvState.loc) lvViewport = { locationId: lvState.loc.id, scale: lvState.scale, tx: lvState.tx, ty: lvState.ty };
 }
@@ -576,12 +852,25 @@ function resetZoom() {
   setTimeout(() => lvState.stage.classList.remove('animate'), 300);
 }
 
+// Zoom the flat canvas to `target` scale keeping screen point (px, py) (viewer coords) fixed.
+function zoomCanvasAt(target, px, py, animate) {
+  const s = Math.min(Math.max(target, lvState.baseScale * 0.5), lvState.baseScale * 12);
+  const ratio = s / lvState.scale;
+  lvState.tx = px - (px - lvState.tx) * ratio;
+  lvState.ty = py - (py - lvState.ty) * ratio;
+  lvState.scale = s;
+  if (animate) lvState.stage.classList.add('animate');
+  applyTransform(lvState.stage);
+  if (animate) setTimeout(() => lvState.stage.classList.remove('animate'), 300);
+}
+
 function setupZoomPan(viewer, stage, img, onChange, onTap) {
   let pointers = new Map();
   let lastDist = 0, lastMid = null;
   let dragging = false;
   let dragStart = null;
   let moved = false;
+  let lastTap = null;
 
   function midpoint(pts) {
     const arr = Array.from(pts.values());
@@ -593,18 +882,19 @@ function setupZoomPan(viewer, stage, img, onChange, onTap) {
   }
 
   viewer.addEventListener('pointerdown', (e) => {
-    // #7: taps that start on an overlaid control (Add/Relocate/Layout toolbar, the relocate
-    // D-pad, hint banner) belong to that control — never to the canvas. Ignore them here so
+    // #7: taps that start on an overlaid control (dock, the relocate D-pad, hint banner,
+    // scene chips) belong to that control — never to the canvas. Ignore them here so
     // toggling Add box OFF can't also register as a tap that creates a hotspot underneath.
-    if (e.target.closest('.location-toolbar, .nudge-pad-circle, .add-hint')) return;
+    if (e.target.closest('.dock, .nudge-pad-circle, .mode-hint, .scene-bar')) return;
     viewer.setPointerCapture(e.pointerId);
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     stage.classList.add('zooming'); // hint the compositor during the gesture
-    moved = false;
     if (pointers.size === 1) {
+      moved = false;
       dragging = true;
       dragStart = { x: e.clientX, y: e.clientY, tx: lvState.tx, ty: lvState.ty };
     } else if (pointers.size === 2) {
+      moved = true;
       dragging = false;
       lastDist = dist(pointers);
       lastMid = midpoint(pointers);
@@ -618,7 +908,7 @@ function setupZoomPan(viewer, stage, img, onChange, onTap) {
     if (pointers.size === 1 && dragging) {
       const dx = e.clientX - dragStart.x;
       const dy = e.clientY - dragStart.y;
-      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) moved = true;
+      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) moved = true;
       lvState.tx = dragStart.tx + dx;
       lvState.ty = dragStart.ty + dy;
       applyTransform(stage);
@@ -631,7 +921,7 @@ function setupZoomPan(viewer, stage, img, onChange, onTap) {
       const fx = newMid.x - rect.left, fy = newMid.y - rect.top;
       if (lastDist > 0) {
         const factor = newDist / lastDist;
-        const target = Math.min(Math.max(lvState.scale * factor, lvState.baseScale * 0.5), lvState.baseScale * 8);
+        const target = Math.min(Math.max(lvState.scale * factor, lvState.baseScale * 0.5), lvState.baseScale * 12);
         const ratio = target / lvState.scale;
         // Keep the pinch midpoint anchored to the same canvas point while scaling.
         lvState.tx = fx - (fx - lvState.tx) * ratio;
@@ -651,14 +941,34 @@ function setupZoomPan(viewer, stage, img, onChange, onTap) {
     const wasSingle = pointers.size === 1;
     const upPos = pointers.get(e.pointerId);
     pointers.delete(e.pointerId);
+    if (pointers.size === 1) {
+      // Lifted one of two fingers: keep panning with the remaining finger (used to freeze).
+      const p = Array.from(pointers.values())[0];
+      dragging = true;
+      dragStart = { x: p.x, y: p.y, tx: lvState.tx, ty: lvState.ty };
+      return;
+    }
     if (pointers.size === 0) {
       if (wasSingle && !moved && dragging && upPos) {
         const targetEl = document.elementFromPoint(upPos.x, upPos.y);
         const pinEl = targetEl && targetEl.closest('.pin');
-        if (pinEl) { dragging = false; return; } // pin has its own tap handler
-        // Multi-page: hand the raw screen point to onTap, which resolves which page/image
-        // was hit and the fractional position within it.
-        onTap(upPos.x, upPos.y, targetEl);
+        if (!pinEl) {
+          const tapMode = lvState && (lvState.addMode || lvState.pasteMode || lvState.layoutMode);
+          if (tapMode) {
+            // Multi-page: hand the raw screen point to onTap, which resolves which page/image
+            // was hit and the fractional position within it.
+            onTap(upPos.x, upPos.y, targetEl);
+          } else {
+            // Double-tap to zoom in on that spot (or back out to fit when already zoomed).
+            const now = Date.now();
+            if (lastTap && now - lastTap.t < 320 && Math.hypot(upPos.x - lastTap.x, upPos.y - lastTap.y) < 40) {
+              const rect = viewer.getBoundingClientRect();
+              if (lvState.scale > lvState.baseScale * 1.6) resetZoom();
+              else zoomCanvasAt(lvState.scale * 2.5, upPos.x - rect.left, upPos.y - rect.top, true);
+              lastTap = null;
+            } else lastTap = { x: upPos.x, y: upPos.y, t: now };
+          }
+        }
       }
       dragging = false;
       stage.classList.remove('zooming');
@@ -667,48 +977,38 @@ function setupZoomPan(viewer, stage, img, onChange, onTap) {
   viewer.addEventListener('pointerup', endPointer);
   viewer.addEventListener('pointercancel', endPointer);
 
-  // Desktop wheel zoom — keep the point under the cursor fixed. With transform-origin 0,0
-  // and screen = tx + canvas*scale, holding a screen point p fixed gives:
-  //   tx' = p - (p - tx) * (newScale/scale)
+  // Desktop wheel zoom — keep the point under the cursor fixed.
   viewer.addEventListener('wheel', (e) => {
+    if (e.target.closest('.dock, .scene-bar')) return;
     e.preventDefault();
     const rect = viewer.getBoundingClientRect();
-    const px = e.clientX - rect.left;
-    const py = e.clientY - rect.top;
-    const factor = e.deltaY < 0 ? 1.12 : 0.89;
-    const newScale = Math.min(Math.max(lvState.scale * factor, lvState.baseScale * 0.5), lvState.baseScale * 8);
-    const ratio = newScale / lvState.scale;
-    lvState.tx = px - (px - lvState.tx) * ratio;
-    lvState.ty = py - (py - lvState.ty) * ratio;
-    lvState.scale = newScale;
-    applyTransform(stage);
+    zoomCanvasAt(lvState.scale * (e.deltaY < 0 ? 1.12 : 0.89), e.clientX - rect.left, e.clientY - rect.top);
   }, { passive: false });
-
-  // Desktop click-to-create (mouse users without touch)
-  viewer.addEventListener('click', (e) => {
-    if (moved) return;
-  });
 }
 
-let pendingLocate = null; // {locationId, hotspotId, pulse} — set before navigating to a location (#7/#9)
+let pendingLocate = null; // {locationId, hotspotId, pulse, noMove} — set before navigating to a location (#7/#9)
 
-// Render pins for one page into its own pin layer.
+// Render pins for one page (or the 360° scene) into its pin layer.
 async function loadPagePins(loc, entry) {
-  entry.pinLayer.innerHTML = '';
+  if (entry.kind === 'pano') entry.viewer.clearPins(); else entry.pinLayer.innerHTML = '';
   const hotspots = await DB.getHotspotsForPage(entry.page.id);
   hotspots.forEach(h => renderPin(h, entry));
   if (pendingLocate && pendingLocate.locationId === loc.id) {
-    const { hotspotId, pulse } = pendingLocate;
+    const { hotspotId, pulse, noMove } = pendingLocate;
     // Only clear+highlight once we've found the pin on some page.
     if (entry.pinLayer.querySelector(`.pin[data-hotspot-id="${hotspotId}"]`)) {
       pendingLocate = null;
-      setTimeout(() => highlightPin(hotspotId, pulse), 80);
+      setTimeout(() => {
+        if (noMove) { const f = findPin(hotspotId); if (f) { f.pin.classList.add('pin-highlight'); setTimeout(() => f.pin.classList.remove('pin-highlight'), 2500); } }
+        else highlightPin(hotspotId, pulse);
+      }, 80);
     }
   }
 }
 
 // Find the page-entry + pin element for a hotspot id across all pages.
 function findPin(hotspotId) {
+  if (!lvState) return null;
   for (const entry of lvState.pages) {
     const pin = entry.pinLayer.querySelector(`.pin[data-hotspot-id="${hotspotId}"]`);
     if (pin) return { entry, pin };
@@ -734,7 +1034,13 @@ function pinCanvasPos(entry, h) {
 function centerOnPin(hotspotId, zoomScale, yBias) {
   const found = findPin(hotspotId);
   if (!found) return;
-  const h = { x: parseFloat(found.pin.style.left), y: parseFloat(found.pin.style.top) };
+  const h = found.pin.__h;
+  if (found.entry.kind === 'pano') {
+    const pv = found.entry.viewer, ll = PanoMath.lonLatFromPct(h.x, h.y);
+    const fov = zoomScale || pv.fov;
+    pv.lookAt(ll.lon, ll.lat - (yBias != null ? (0.5 - yBias) * fov : 0), fov, 500);
+    return;
+  }
   const { px, py } = pinCanvasPos(found.entry, h);
   if (zoomScale) lvState.scale = zoomScale;
   const vw = lvState.viewer.clientWidth, vh = lvState.viewer.clientHeight;
@@ -749,26 +1055,25 @@ function centerOnPin(hotspotId, zoomScale, yBias) {
 // Highlight a pin: a static red ring (#7) or a pulsing "breathing" ring (#9 Locate).
 // Always ZOOMS IN on the marker (never out) so it's clearly visible even on a big
 // multi-photo canvas, and dims the rest of the canvas for ~3.5s (spotlight) so the user can
-// instantly see WHERE the searched item is.
+// instantly see WHERE the searched item is. In a 360° scene the view turns to face it.
 function highlightPin(hotspotId, pulse) {
   if (!lvState) return;
   const f = findPin(hotspotId);
-  if (f) {
+  if (f && f.entry.kind === 'pano') {
+    centerOnPin(hotspotId, Math.min(f.entry.viewer.fov, 55));
+  } else if (f) {
     const vw = lvState.viewer.clientWidth, vh = lvState.viewer.clientHeight;
     // Zoom so the marker's own page roughly fills the viewer, then a bit more — but never
     // LESS than the current fit scale, so Locate is always a zoom-IN, never a zoom-out.
     const pageFit = Math.min(vw / f.entry.w, vh / f.entry.h) || 1;
     const target = Math.max(pageFit * 1.6, (lvState.baseScale || 1) * 1.8);
     centerOnPin(hotspotId, target);
-  } else {
-    centerOnPin(hotspotId, (lvState.baseScale || 1) * 1.8);
   }
-  const found = findPin(hotspotId);
-  if (!found) return;
+  if (!f) return;
   lvState.pages.forEach(e => e.pinLayer.querySelectorAll('.pin-highlight, .pin-locate').forEach(p => p.classList.remove('pin-highlight', 'pin-locate')));
-  found.pin.classList.add(pulse ? 'pin-locate' : 'pin-highlight');
-  spotlightPin(found);
-  if (!pulse) setTimeout(() => found.pin.classList.remove('pin-highlight'), 3500);
+  f.pin.classList.add(pulse ? 'pin-locate' : 'pin-highlight');
+  spotlightPin(f);
+  if (!pulse) setTimeout(() => f.pin.classList.remove('pin-highlight'), 3500);
 }
 
 // Spotlight the located marker: dim every page image AND every OTHER pin for ~3.5s, leaving
@@ -781,30 +1086,30 @@ function spotlightPin(found) {
   // Clear any stale target flag, then flag the current one.
   lvState.pages.forEach(e => e.pinLayer.querySelectorAll('.spotlight-target').forEach(p => p.classList.remove('spotlight-target')));
   found.pin.classList.add('spotlight-target');
-  lvState.viewer.classList.add('spotlight');
+  const viewer = lvState.viewer;
+  viewer.classList.add('spotlight');
   spotlightTimer = setTimeout(() => {
-    lvState.viewer.classList.remove('spotlight');
+    viewer.classList.remove('spotlight');
     found.pin.classList.remove('spotlight-target');
     spotlightTimer = null;
   }, 3500);
 }
 
 function renderPin(h, entry) {
-  const pinLayer = entry.pinLayer, img = entry.img;
   const isAnnotation = h.type === 'annotation';
   const pin = el('div', {
-    class: 'pin' + (isAnnotation ? ' annotation' : ''),
-    style: `left:${h.x}%; top:${h.y}%; position:absolute;`
+    class: 'pin' + (isAnnotation ? ' annotation' : '')
   }, [
     el('div', { class: 'pin-dot' }, [isAnnotation ? '' : el('span', {}, [h.number ? h.number.slice(0, 3) : '•'])])
   ]);
   pin.dataset.hotspotId = h.id;
+  pin.__h = h;
   // #15 adaptive colour: sample the image pixel under the marker and pick a contrasting
   // hue if the default (blue box / red annotation) would blend into the background.
   applyAdaptivePinColor(pin, h, entry);
 
   // Pins get their own independent tap detection so they always open reliably,
-  // regardless of the viewer's pointer-capture-based pan/zoom/create-hotspot logic.
+  // regardless of the viewer's pan/zoom/create-hotspot logic.
   let pinDownPos = null, pinDragging = false;
   pin.addEventListener('pointerdown', (e) => {
     e.stopPropagation();
@@ -818,22 +1123,11 @@ function renderPin(h, entry) {
     if (!pinDragging && Math.hypot(dx, dy) < 6) return; // ignore micro-jitter
     pinDragging = true;
     hideNudgePad();
-    // Move the pin live: convert the pointer position to a % of the (possibly rotated/scaled)
-    // image so the marker follows the finger exactly at any zoom/rotation.
-    const { x: cx, y: cy } = screenToCanvas(e.clientX, e.clientY);
-    const frac = canvasPointToPageFraction(entry, cx, cy);
-    // Outside the image bounds → clamp using the unclamped fraction so it stays grabbable.
-    let nx, ny;
-    if (frac) { nx = frac.relX * 100; ny = frac.relY * 100; }
-    else {
-      const raw = canvasPointToPageFractionUnclamped(entry, cx, cy);
-      nx = raw.relX * 100; ny = raw.relY * 100;
-    }
-    nx = Math.max(0, Math.min(100, nx));
-    ny = Math.max(0, Math.min(100, ny));
-    h.x = nx; h.y = ny;
-    pin.style.left = nx + '%';
-    pin.style.top = ny + '%';
+    // Move the pin live: the pointer position becomes the marker's % position on the image
+    // (flat: rotation/scale aware; 360°: the longitude/latitude under the finger).
+    const p = entry.fromScreen(e.clientX, e.clientY);
+    h.x = p.x; h.y = p.y;
+    entry.place(pin, h);
   });
   pin.addEventListener('pointerup', async (e) => {
     e.stopPropagation();
@@ -847,7 +1141,7 @@ function renderPin(h, entry) {
           await DB.updateHotspot(h); // persist the dragged position
           showToast('Position updated');
         } else if (isTap) {
-          showNudgePad(h, pin, img); // tap in relocate mode → arrow pad
+          showNudgePad(h, pin, entry); // tap in relocate mode → arrow pad
         }
       } else if (isTap) {
         // Add toggle ON => editable detail (Save/Delete/Add Photos).
@@ -860,19 +1154,20 @@ function renderPin(h, entry) {
   });
   pin.addEventListener('click', (e) => e.stopPropagation());
 
-  pinLayer.appendChild(pin);
+  entry.place(pin, h);
 }
 
 // Jump to a hotspot's marker on the canvas and pulse a red locate ring around it — used by
 // annotation link chips (#18) and search Locate. Works whether the target is on the current
 // location (highlight directly) or a different one (navigate there first).
-function locateHotspotOnCanvas(hotspotId, locationId) {
+function locateHotspotOnCanvas(hotspotId, locationId, pulse = true) {
   if (lvState && lvState.loc && lvState.loc.id === locationId && findPin(hotspotId)) {
-    highlightPin(hotspotId, true);
+    highlightPin(hotspotId, pulse);
     return;
   }
-  pendingLocate = { locationId, hotspotId, pulse: true };
-  goLocation(locationId);
+  pendingLocate = { locationId, hotspotId, pulse };
+  if (state.view === 'location' && state.locationId === locationId) render();
+  else goLocation(locationId);
 }
 
 // Zoom in on a hotspot for relocation. The zoom level is based on the marker's OWN PAGE
@@ -881,7 +1176,8 @@ function locateHotspotOnCanvas(hotspotId, locationId) {
 // then a touch more, and place the marker in the upper-middle (above the D-pad).
 function zoomToPin(hotspotId) {
   const found = findPin(hotspotId);
-  if (!found) { centerOnPin(hotspotId, (lvState.baseScale || 1) * 1.5, 0.36); return; }
+  if (!found) return;
+  if (found.entry.kind === 'pano') { centerOnPin(hotspotId, Math.min(found.entry.viewer.fov, 50), 0.36); return; }
   const vw = lvState.viewer.clientWidth, vh = lvState.viewer.clientHeight;
   const pageFit = Math.min(vw / found.entry.w, vh / found.entry.h) || 1; // scale to fit that page
   centerOnPin(hotspotId, pageFit * 1.4, 0.36);
@@ -897,32 +1193,33 @@ function hideNudgePad() {
   if (nudgeDismiss) { document.removeEventListener('pointerdown', nudgeDismiss, true); nudgeDismiss = null; }
   if (nudgePadEl) { nudgePadEl.remove(); nudgePadEl = null; }
 }
-function showNudgePad(h, pin, img) {
+function showNudgePad(h, pin, entry) {
   hideNudgePad();
   zoomToPin(h.id); // #7: zoom ~150% and centre the marker being moved
 
-  const STEP = 0.5; // percent of image dimension per step
+  const pano = entry.kind === 'pano';
+  // Percent of image per step. On a 360° scene x spans 360° and y 180°, so use a finer x step
+  // to keep both directions ≈0.9° per tap, and let x wrap around the circle.
+  const STEP_X = pano ? 0.25 : 0.5, STEP_Y = 0.5;
   let saveTimer = null;
   function nudge(ddx, ddy) {
-    h.x = Math.max(0, Math.min(100, h.x + ddx * STEP));
-    h.y = Math.max(0, Math.min(100, h.y + ddy * STEP));
-    pin.style.left = h.x + '%';
-    pin.style.top = h.y + '%';
+    h.x = h.x + ddx * STEP_X;
+    h.x = pano ? ((h.x % 100) + 100) % 100 : Math.max(0, Math.min(100, h.x));
+    h.y = Math.max(0, Math.min(100, h.y + ddy * STEP_Y));
+    entry.place(pin, h);
     // Debounce DB writes during continuous movement; flush shortly after the last step.
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => DB.updateHotspot(h), 250);
   }
 
   // A direction button: one tap = one step; press-and-hold = repeat until released.
-  function dirBtn(label, ddx, ddy, cls) {
-    const btn = el('button', { class: 'nudge-btn ' + cls }, [label]);
-    let holdTimer = null, repeat = null, held = false;
+  function dirBtn(ic, ddx, ddy, cls) {
+    const btn = el('button', { class: 'nudge-btn ' + cls }, [icon(ic, 18)]);
+    let holdTimer = null, repeat = null;
     const start = (e) => {
       e.preventDefault(); e.stopPropagation();
-      held = false;
       nudge(ddx, ddy); // immediate first step
       holdTimer = setTimeout(() => {
-        held = true;
         repeat = setInterval(() => nudge(ddx, ddy), 70); // continuous while held
       }, 300);
     };
@@ -938,12 +1235,12 @@ function showNudgePad(h, pin, img) {
     return btn;
   }
 
-  nudgePadEl = el('div', { class: 'nudge-pad-circle' }, [
-    dirBtn('▲', 0, -1, 'up'),
-    dirBtn('◀', -1, 0, 'left'),
-    el('div', { class: 'nudge-hub' }, ['✛']),
-    dirBtn('▶', 1, 0, 'right'),
-    dirBtn('▼', 0, 1, 'down')
+  nudgePadEl = el('div', { class: 'nudge-pad-circle glass' }, [
+    dirBtn('arrowUp', 0, -1, 'up'),
+    dirBtn('back', -1, 0, 'left'),
+    el('div', { class: 'nudge-hub' }, [icon('move', 14)]),
+    dirBtn('chevronRight', 1, 0, 'right'),
+    dirBtn('arrowDown', 0, 1, 'down')
   ]);
   // Swallow taps that land on the pad itself so they don't reach the viewer or the
   // outside-dismiss handler.
@@ -960,8 +1257,8 @@ function showNudgePad(h, pin, img) {
 
 // ---- #15 Adaptive marker colour ----
 // Default colours: box hotspot = blue, annotation = red (both semi-transparent as before).
-// If the diagram pixel UNDER the marker is close to the default colour's hue (so the marker
-// would blend in), switch to a contrasting colour instead. We sample the pixel from a tiny
+// If the pixel UNDER the marker is close to the default colour's hue (so the marker would
+// blend in), switch to a contrasting colour instead. We sample the pixel from a tiny
 // offscreen canvas of the page image (cached per page).
 const DEFAULT_BOX = [74, 158, 255];      // blue
 const DEFAULT_ANNO = [229, 72, 72];      // red
@@ -984,10 +1281,11 @@ function hueClose(h1, h2, tol = 40) {
 function samplePixel(entry, xPct, yPct) {
   try {
     if (!entry.__sampleCanvas) {
+      if (!entry.img || !entry.w) return null;
       const c = document.createElement('canvas');
       const SW = 60, SH = Math.max(1, Math.round(60 * entry.h / entry.w));
       c.width = SW; c.height = SH;
-      c.getContext('2d').drawImage(entry.img, 0, 0, SW, SH);
+      c.getContext('2d', { willReadFrequently: true }).drawImage(entry.img, 0, 0, SW, SH);
       entry.__sampleCanvas = c;
     }
     const c = entry.__sampleCanvas;
@@ -1041,6 +1339,52 @@ async function handleTapCreate(loc, pageId, xPct, yPct, entry) {
       renderPin(h, entry);
     }
   });
+}
+
+// ---- Paste a copied hotspot here: move the original, or drop a copy ----
+async function handlePasteAt(loc, pageId, x, y) {
+  const clip = getClipboard();
+  if (!clip) { setMode(null); return; }
+  const src = await DB.getHotspot(clip.hotspotId);
+  if (!src) {
+    clearClipboard();
+    showToast('The copied item no longer exists');
+    lvModes.pasteMode = false;
+    render();
+    return;
+  }
+  const fromLoc = src.locationId === loc.id ? null : await DB.getLocation(src.locationId);
+  const label = clipLabel(clip);
+  const photos = await DB.getPhotosForHotspot(src.id);
+  const overlay = el('div', { class: 'modal-overlay' });
+  const finishWith = (hotspotId, msg) => {
+    overlay.remove();
+    lvModes.pasteMode = false;
+    pendingLocate = { locationId: loc.id, hotspotId, noMove: true };
+    render();
+    showToast(msg);
+  };
+  overlay.appendChild(el('div', { class: 'modal-sheet' }, [
+    el('div', { class: 'sheet-grabber' }),
+    el('h2', {}, [`Place “${label}” here`]),
+    el('p', { class: 'sheet-sub' }, [fromLoc ? `It is currently in ${fromLoc.name}.` : 'It is currently elsewhere in this location.']),
+    el('div', { class: 'menu-group' }, [
+      menuItem('move', 'Move it here', async () => {
+        await DB.moveHotspot(src.id, { locationId: loc.id, pageId, x, y });
+        clearClipboard();
+        finishWith(src.id, fromLoc ? `Moved from ${fromLoc.name}` : 'Moved here');
+      }, { sub: `Takes the ${src.type === 'annotation' ? 'annotation' : 'box'}${photos.length ? ` and its ${photos.length} photo${photos.length === 1 ? '' : 's'}` : ''} out of ${fromLoc ? fromLoc.name : 'its old spot'}` }),
+      menuItem('copy', 'Paste a copy', async () => {
+        const h = await DB.duplicateHotspot(src.id, { locationId: loc.id, pageId, x, y });
+        if (h) finishWith(h.id, 'Copy pasted');
+      }, { sub: 'Keeps the original where it is' })
+    ]),
+    el('div', { class: 'btn-row' }, [
+      el('button', { class: 'btn ghost', onclick: () => { overlay.remove(); clearClipboard(); lvModes.pasteMode = false; render(); showToast('Clipboard cleared'); } }, ['Clear clipboard']),
+      el('button', { class: 'btn secondary', onclick: () => overlay.remove() }, ['Cancel'])
+    ])
+  ]));
+  showOverlay(overlay);
 }
 
 function toggleBrowse(loc) {
@@ -1100,12 +1444,12 @@ async function openBrowseModal(loc) {
     listWrap.innerHTML = '';
     const shown = enriched.filter(matches);
     if (!shown.length) {
-      listWrap.appendChild(el('div', { class: 'empty-state' }, [hotspots.length ? 'No matches.' : 'No hotspots yet for this location.']));
+      listWrap.appendChild(el('div', { class: 'empty-state small' }, [el('div', { class: 'empty-text' }, [hotspots.length ? 'No matches.' : 'No items yet for this location.'])]));
       return;
     }
     for (const rec of shown) {
       const { h, photos, captions } = rec;
-      const thumb = el('div', { class: 'hlt-thumb' }, photos[0] ? [] : [h.type === 'annotation' ? '💬' : '📦']);
+      const thumb = el('div', { class: 'hlt-thumb' }, photos[0] ? [] : [icon(h.type === 'annotation' ? 'tag' : 'box', 20)]);
       if (photos[0]) thumb.style.backgroundImage = `url(${blobToUrl(photos[0].photo)})`;
       const children = [
         el('div', { class: 'name' }, [h.name || '(unnamed)']),
@@ -1124,28 +1468,28 @@ async function openBrowseModal(loc) {
         children.push(buildMatchedPhotoGrid(matchedPhotos, photos, h));
       }
       const item = el('div', {
-        class: 'hotspot-list-item', onclick: () => { overlay.remove(); highlightPin(h.id, false); }
+        class: 'hotspot-list-item', onclick: () => { overlay.remove(); locateHotspotOnCanvas(h.id, loc.id, false); }
       }, [thumb, el('div', { class: 'hlt-text' }, children)]);
       listWrap.appendChild(item);
     }
   }
 
-  const searchInput = el('input', { type: 'text', placeholder: 'Search name, number, or caption…' });
+  const searchInput = el('input', { type: 'search', placeholder: 'Search name, number, or caption…', autocomplete: 'off' });
   searchInput.addEventListener('input', () => { query = searchInput.value.trim(); renderList(); });
 
-  const eyeBtn = el('button', { class: 'icon-btn', title: 'Expand (show captions)' }, ['👁️']);
+  const eyeBtn = el('button', { class: 'icon-btn round', title: 'Show captions' }, [icon('eye', 20)]);
   eyeBtn.addEventListener('click', () => { expanded = !expanded; eyeBtn.classList.toggle('on', expanded); renderList(); });
 
   renderList();
 
   const sheet = el('div', { class: 'modal-sheet' }, [
     el('div', { class: 'view-header' }, [
-      el('h2', { style: 'margin:0;' }, [`${loc.name} — All Hotspots`]),
+      el('h2', { style: 'margin:0;' }, [`${loc.name} — all items`]),
       eyeBtn
     ]),
-    el('div', { class: 'field' }, [searchInput]),
+    el('div', { class: 'field search-field boxed' }, [icon('search', 18), searchInput]),
     listWrap,
-    el('div', { class: 'btn-row', style: 'margin-top:12px;' }, [
+    el('div', { class: 'btn-row' }, [
       el('button', { class: 'btn secondary', onclick: () => overlay.remove() }, ['Close'])
     ])
   ]);
@@ -1159,34 +1503,34 @@ async function openBrowseModal(loc) {
 async function openEditLocationModal(loc) {
   const overlay = el('div', { class: 'modal-overlay centered' });
   const nameInput = el('input', { type: 'text', value: loc.name });
-  const typeInput = el('select', {}, [
-    el('option', { value: 'storeroom' }, ['Storeroom / Box Inventory']),
-    el('option', { value: 'diagram' }, ['Diagram / Panel (Annotation Mode)'])
-  ]);
-  typeInput.value = loc.type || 'storeroom';
+  const typeSeg = segmented([
+    { value: 'storeroom', label: 'Boxes', icon: 'box' },
+    { value: 'diagram', label: 'Diagram', icon: 'tag' }
+  ], loc.type || 'storeroom');
 
   const sheet = el('div', { class: 'modal-sheet' }, [
-    el('h2', {}, ['Edit Location']),
+    el('h2', {}, ['Edit location']),
     el('div', { class: 'field' }, [el('label', {}, ['Name']), nameInput]),
-    el('div', { class: 'field' }, [el('label', {}, ['Type']), typeInput]),
+    el('div', { class: 'field' }, [el('label', {}, ['Type']), typeSeg.el]),
     // #11: "Replace Cover Photo" intentionally removed — swapping the cover photo would
     // orphan every hotspot already placed on the old image.
+    el('button', {
+      class: 'btn ghost danger-text block', onclick: async () => {
+        if (confirm(`Delete "${loc.name}"? You can restore it from Settings until you close the app.`)) {
+          await deleteLocationWithUndo(loc);
+          destroyPanoCache();
+          // Robustly close all open overlays and land cleanly on home.
+          closeAllOverlays(resetToHome);
+          showToast('Location deleted — restore from Settings');
+        }
+      }
+    }, [icon('trash', 18), 'Delete location']),
     el('div', { class: 'btn-row' }, [
       el('button', { class: 'btn secondary', onclick: () => overlay.remove() }, ['Cancel']),
       el('button', {
-        class: 'btn danger', onclick: async () => {
-          if (confirm(`Delete "${loc.name}"? You can restore it from Settings (⚙️) until you close the app.`)) {
-            await deleteLocationWithUndo(loc);
-            // Robustly close all open overlays and land cleanly on home.
-            closeAllOverlays(resetToHome);
-            showToast('Location deleted — restore from Settings');
-          }
-        }
-      }, ['Delete Location']),
-      el('button', {
         class: 'btn', onclick: async () => {
           loc.name = nameInput.value.trim() || loc.name;
-          loc.type = typeInput.value;
+          loc.type = typeSeg.value;
           await DB.updateLocation(loc);
           overlay.remove();
           render();

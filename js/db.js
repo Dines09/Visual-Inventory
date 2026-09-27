@@ -178,7 +178,11 @@ const DB = {
   },
 
   // ---------- Pages (positioned images within a location) ----------
-  async addPage({ locationId, photo, offsetX, offsetY, order, rotation, scale }) {
+  // kind: undefined / 'flat' → a normal photo laid out on the location's 2D canvas.
+  //       'pano'            → a 360° scene: `photo` is an equirectangular image, `pano` holds
+  //                           its metadata (start view, coverage limits), `name` labels it.
+  //                           Hotspots on it use x = longitude %, y = latitude % of the image.
+  async addPage({ locationId, photo, offsetX, offsetY, order, rotation, scale, kind, name, pano }) {
     const t = await tx('pages', 'readwrite');
     const p = {
       id: uuid(), locationId, photo: photo || null,
@@ -189,6 +193,7 @@ const DB = {
       rotation: rotation || 0, scale: scale || 1,
       order: order || 0, createdAt: Date.now()
     };
+    if (kind === 'pano') { p.kind = 'pano'; p.name = name || ''; p.pano = pano || {}; }
     await reqToPromise(t.objectStore('pages').add(p));
     return p;
   },
@@ -256,6 +261,27 @@ const DB = {
     const t = await tx('hotspots', 'readwrite');
     await reqToPromise(t.objectStore('hotspots').put(h));
     return h;
+  },
+  // Copy a hotspot (fields + all its photos) to a new place — any location, any page.
+  async duplicateHotspot(srcId, { locationId, pageId, x, y }) {
+    const src = await DB.getHotspot(srcId);
+    if (!src) return null;
+    const h = await DB.addHotspot({
+      locationId, pageId, x, y,
+      name: src.name, number: src.number, description: src.description, type: src.type,
+      // Annotation links only make sense inside the same location.
+      links: src.locationId === locationId ? (src.links || []).slice() : []
+    });
+    const photos = await DB.getPhotosForHotspot(srcId);
+    for (const p of photos) await DB.addPhoto({ hotspotId: h.id, photo: p.photo, caption: p.caption, order: p.order });
+    return h;
+  },
+  // Move a hotspot (with its photos, which are keyed by hotspot id) to a new place.
+  async moveHotspot(id, { locationId, pageId, x, y }) {
+    const h = await DB.getHotspot(id);
+    if (!h) return null;
+    h.locationId = locationId; h.pageId = pageId || null; h.x = x; h.y = y;
+    return DB.updateHotspot(h);
   },
   async deleteHotspot(id) {
     const photos = await DB.getPhotosForHotspot(id);

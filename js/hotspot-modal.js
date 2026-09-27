@@ -46,6 +46,24 @@ async function suggestNextNumber(locationId) {
   return String(max + 1);
 }
 
+// Copy a hotspot to the app clipboard so it can be pasted (moved or duplicated) in any
+// location — including a different store.
+function copyHotspot(h, locName, btn) {
+  const c = setClipboard(h, locName);
+  showToast(`Copied “${clipLabel(c)}” — open any location and tap Paste`, 3200);
+  if (btn) {
+    btn.classList.add('done');
+    btn.innerHTML = '';
+    btn.append(icon('check', 18), el('span', {}, ['Copied']));
+  }
+  // Refresh the location screen behind the sheet so its dock shows Paste right away.
+  if (state.view === 'location') render();
+}
+function copyButton(h, locName) {
+  const b = el('button', { class: 'pill-btn', title: 'Copy — paste it in any location', onclick: () => copyHotspot(h, locName, b) }, [icon('copy', 18), el('span', {}, ['Copy'])]);
+  return b;
+}
+
 function openHotspotForm({ locationId, pageId, x, y, type, onSaved }) {
   const overlay = el('div', { class: 'modal-overlay detail-popup' });
   const isAnno = type === 'annotation';
@@ -75,13 +93,14 @@ function openHotspotForm({ locationId, pageId, x, y, type, onSaved }) {
     return h;
   }
 
-  const fields = [ el('div', { class: 'field' }, [el('label', {}, ['Name']), nameInput]) ];
-  if (!isAnno) fields.push(el('div', { class: 'field' }, [el('label', {}, ['Number / Label']), numberInput]));
+  const fields = [el('div', { class: 'field' }, [el('label', {}, ['Name']), nameInput])];
+  if (!isAnno) fields.push(el('div', { class: 'field' }, [el('label', {}, ['Number / label']), numberInput]));
   fields.push(el('div', { class: 'field' }, [el('label', {}, ['Description']), descInput]));
   if (isAnno) fields.push(el('div', { class: 'field' }, [el('label', {}, ['References (@ other annotations)']), refInput]));
 
   const sheet = el('div', { class: 'modal-sheet' }, [
-    el('h2', {}, [isAnno ? 'New Annotation' : 'New Hotspot']),
+    el('div', { class: 'sheet-grabber' }),
+    el('h2', {}, [isAnno ? 'New annotation' : 'New box']),
     ...fields,
     el('div', { class: 'btn-row' }, [
       el('button', { class: 'btn secondary', onclick: () => overlay.remove() }, ['Cancel']),
@@ -90,7 +109,7 @@ function openHotspotForm({ locationId, pageId, x, y, type, onSaved }) {
           const h = await saveHotspot();
           reuseOverlayAsDetail(overlay, h.id, { openPhotos: true });
         }
-      }, ['+ Add Photos']),
+      }, [icon('camera', 18), 'Photos']),
       el('button', {
         class: 'btn', onclick: async () => {
           const h = await saveHotspot();
@@ -155,11 +174,16 @@ async function reuseOverlayAsDetail(overlay, hotspotId, opts = {}) {
   }
 }
 
-async function openHotspotDetail(hotspotId, opts = {}) {
+async function openHotspotDetail(hotspotId) {
   const overlay = el('div', { class: 'modal-overlay centered detail-popup' });
   overlay.appendChild(el('div', { class: 'modal-sheet' }));
   showOverlay(overlay);
   await renderHotspotDetailInto(overlay, hotspotId);
+}
+
+function typeBadgeFor(h) {
+  const isAnno = h.type === 'annotation';
+  return el('span', { class: 'type-badge ' + (isAnno ? 'anno' : 'box') }, [icon(isAnno ? 'tag' : 'box', 12), isAnno ? 'Annotation' : 'Box']);
 }
 
 // Render the editable hotspot detail (Name/Number/Description/Photos + Close/Delete/Save)
@@ -197,12 +221,12 @@ async function renderHotspotDetailInto(overlay, hotspotId) {
       photoGrid.appendChild(thumb);
     });
 
-    const typeBadge = el('span', {
-      class: 'type-badge ' + (isAnno ? 'anno' : 'box')
-    }, [isAnno ? 'ANNOTATION' : 'BOX HOTSPOT']);
-    sheet.appendChild(el('h2', {}, [loc ? loc.name : '', typeBadge]));
+    sheet.appendChild(el('div', { class: 'view-header' }, [
+      el('div', { class: 'vh-title' }, [el('h2', {}, [loc ? loc.name : '']), typeBadgeFor(h)]),
+      copyButton(h, loc ? loc.name : '')
+    ]));
     sheet.appendChild(el('div', { class: 'field' }, [el('label', {}, ['Name']), nameInput]));
-    if (!isAnno) sheet.appendChild(el('div', { class: 'field' }, [el('label', {}, ['Number / Label']), numberInput]));
+    if (!isAnno) sheet.appendChild(el('div', { class: 'field' }, [el('label', {}, ['Number / label']), numberInput]));
     sheet.appendChild(el('div', { class: 'field' }, [el('label', {}, ['Description']), descInput]));
 
     if (isAnno) {
@@ -215,10 +239,10 @@ async function renderHotspotDetailInto(overlay, hotspotId) {
       if (outgoing.length) sheet.appendChild(linkChips('Goes to', outgoing));
     }
 
-    sheet.appendChild(el('div', { class: 'section-title', style: 'padding-left:0;' }, ['Photos']));
-    sheet.appendChild(photoGrid);
+    sheet.appendChild(el('div', { class: 'section-title' }, [`Photos (${photos.length})`]));
+    if (photos.length) sheet.appendChild(photoGrid);
 
-    const addPhotosBtn = el('button', { 'data-role': 'add-photos', class: 'btn secondary', onclick: () => addPhotosFlow(h.id, renderDetailBody) }, ['+ Add Photos']);
+    const addPhotosBtn = el('button', { 'data-role': 'add-photos', class: 'btn secondary block', onclick: () => addPhotosFlow(h.id, renderDetailBody) }, [icon('camera', 18), 'Add photos']);
     sheet.appendChild(el('div', { class: 'field' }, [addPhotosBtn]));
 
     async function persistFields() {
@@ -251,15 +275,15 @@ async function renderHotspotDetailInto(overlay, hotspotId) {
     sheet.appendChild(el('div', { class: 'btn-row' }, [
       el('button', { class: 'btn secondary', onclick: () => overlay.remove() }, ['Close']),
       el('button', {
-        class: 'btn danger', onclick: async () => {
-          if (confirm('Delete this hotspot and all its photos?')) {
+        class: 'btn danger', title: 'Delete', onclick: async () => {
+          if (confirm('Delete this item and all its photos?')) {
             overlay.__persist = null; // don't write a deleted record back on close
             await DB.deleteHotspot(h.id);
             overlay.remove();
             render();
           }
         }
-      }, ['Delete']),
+      }, [icon('trash', 18)]),
       el('button', {
         class: 'btn', onclick: async () => {
           overlay.__persist = null;
@@ -274,8 +298,8 @@ async function renderHotspotDetailInto(overlay, hotspotId) {
 }
 
 // Read-only "nice card" view of a hotspot — used when tapping a marker with the Add
-// toggle OFF, and from Search. Shows Name/Number/Description/Photos and a single Close
-// button only. No editable fields, no Save, no Delete (#2).
+// toggle OFF, and from Search. Shows Name/Number/Description/Photos with Copy and Close (✕).
+// No editable fields, no Save, no Delete (#2).
 async function openHotspotView(hotspotId) {
   const h = await DB.getHotspot(hotspotId);
   if (!h) return;
@@ -283,10 +307,6 @@ async function openHotspotView(hotspotId) {
   const photos = await DB.getPhotosForHotspot(h.id);
 
   const overlay = el('div', { class: 'modal-overlay centered detail-popup' });
-
-  const typeBadge = el('span', {
-    class: 'type-badge ' + (h.type === 'annotation' ? 'anno' : 'box')
-  }, [h.type === 'annotation' ? 'ANNOTATION' : 'BOX HOTSPOT']);
 
   const photoGrid = el('div', { class: 'photo-grid' });
   photos.forEach((p, idx) => {
@@ -299,18 +319,22 @@ async function openHotspotView(hotspotId) {
   });
 
   const header = el('div', { class: 'view-header' }, [
-    el('h2', { style: 'margin:0;' }, [loc ? loc.name : '', typeBadge]),
-    el('button', { class: 'icon-btn view-close', title: 'Close', onclick: () => overlay.remove() }, ['✕'])
+    el('div', { class: 'vh-title' }, [el('h2', {}, [loc ? loc.name : '']), typeBadgeFor(h)]),
+    el('div', { class: 'vh-actions' }, [
+      copyButton(h, loc ? loc.name : ''),
+      el('button', { class: 'icon-btn round view-close', title: 'Close', onclick: () => overlay.remove() }, [icon('close', 20)])
+    ])
   ]);
 
   const isAnno = h.type === 'annotation';
   const rows = [
     header,
-    el('div', { class: 'view-row' }, [el('span', { class: 'view-label' }, ['Name']), el('span', { class: 'view-val' }, [h.name || '—'])])
+    el('div', { class: 'view-hero' }, [
+      el('div', { class: 'vh-name' }, [h.name || '(unnamed)']),
+      !isAnno && h.number ? el('div', { class: 'vh-number' }, ['#' + h.number]) : null
+    ])
   ];
-  // Annotations show Description (no Number). Boxes keep Number.
-  if (!isAnno) rows.push(el('div', { class: 'view-row' }, [el('span', { class: 'view-label' }, ['Number']), el('span', { class: 'view-val' }, [h.number || '—'])]));
-  rows.push(el('div', { class: 'view-row col' }, [el('span', { class: 'view-label' }, ['Description']), el('div', { class: 'view-val' }, [h.description || '—'])]));
+  if (h.description) rows.push(el('div', { class: 'view-row col' }, [el('span', { class: 'view-label' }, ['Description']), el('div', { class: 'view-val' }, [h.description])]));
 
   // #18: link chips for annotations. "Comes from" = who references this; "Goes to" = what
   // this references. Tapping a chip locates that annotation on the diagram.
@@ -330,8 +354,8 @@ async function openHotspotView(hotspotId) {
     if (outgoing.length) rows.push(chip('Goes to', outgoing));
   }
 
-  rows.push(el('div', { class: 'section-title', style: 'padding-left:0;' }, ['Photos (' + photos.length + ')']));
-  rows.push(photos.length ? photoGrid : el('div', { class: 'view-val', style: 'opacity:0.6;padding:4px 0;' }, ['No photos']));
+  rows.push(el('div', { class: 'section-title' }, ['Photos (' + photos.length + ')']));
+  rows.push(photos.length ? photoGrid : el('div', { class: 'view-val muted' }, ['No photos']));
 
   const sheet = el('div', { class: 'modal-sheet' }, rows);
   overlay.appendChild(sheet);
@@ -375,18 +399,21 @@ async function addPhotosFlow(hotspotId, onDone) {
     return new Promise((resolve) => {
       const overlay = el('div', { class: 'modal-overlay centered' });
       const input = el('input', { type: 'text', placeholder: 'Caption for this photo (optional)…', value: photo.caption || '' });
+      let settled = false;
+      const done = () => { if (!settled) { settled = true; resolve(); } };
+      overlay.__onClose = done; // Back / tap-outside must not leave the flow hanging
       async function ok() {
         photo.caption = input.value.trim();
         try { await DB.updatePhoto(photo); } catch (err) { console.error(err); }
         overlay.remove();
-        resolve();
+        done();
       }
       const sheet = el('div', { class: 'modal-sheet' }, [
         el('h2', {}, ['Add caption']),
         el('div', { class: 'caption-preview' }, [el('img', { src: blobToUrl(photo.photo) })]),
         el('div', { class: 'field' }, [input]),
         el('div', { class: 'btn-row' }, [
-          el('button', { class: 'btn secondary', onclick: () => { overlay.remove(); resolve(); } }, ['Cancel']),
+          el('button', { class: 'btn secondary', onclick: () => { overlay.remove(); done(); } }, ['Skip']),
           el('button', { class: 'btn', onclick: ok }, ['OK'])
         ])
       ]);
@@ -400,12 +427,14 @@ async function addPhotosFlow(hotspotId, onDone) {
 
   function askMore() {
     const overlay = el('div', { class: 'modal-overlay centered' });
+    let chosen = false;
+    overlay.__onClose = () => { if (!chosen) { chosen = true; finish(); } };
     const sheet = el('div', { class: 'modal-sheet' }, [
       el('h2', {}, [`Added ${count} photo${count === 1 ? '' : 's'}`]),
-      el('p', {}, ['Add another photo, or finish here.']),
+      el('p', { class: 'sheet-sub' }, ['Add another photo, or finish here.']),
       el('div', { class: 'btn-row' }, [
-        el('button', { class: 'btn secondary', onclick: () => { overlay.remove(); addOne(); } }, ['+ Add More']),
-        el('button', { class: 'btn', onclick: () => { overlay.remove(); finish(); } }, ['Done'])
+        el('button', { class: 'btn secondary', onclick: () => { chosen = true; overlay.remove(); addOne(); } }, [icon('plus', 18), 'Add more']),
+        el('button', { class: 'btn', onclick: () => { chosen = true; overlay.remove(); finish(); } }, ['Done'])
       ])
     ]);
     overlay.appendChild(sheet);
@@ -418,28 +447,38 @@ async function addPhotosFlow(hotspotId, onDone) {
 }
 
 // Full-screen photo viewer. Transform-based carousel so one swipe = exactly one image
-// (a fast flick can never skip past several photos). Pass opts.readOnly to hide edit/delete.
+// (a fast flick can never skip past several photos). Each photo can be zoomed:
+//   • pinch with two fingers (zooms around the fingers), drag to pan while zoomed
+//   • double-tap to zoom in on that spot / double-tap again to fit
+//   • mouse wheel or +/− keys on desktop
+// Swiping to the next photo only happens at normal size, so panning never flips photos.
+// Pass opts.readOnly to hide edit/delete.
 function openPhotoViewer(photos, startIdx, hotspotId, onChange, opts = {}) {
   const readOnly = !!opts.readOnly;
+  const MAX_ZOOM = 6;
   let index = Math.max(0, Math.min(startIdx, photos.length - 1));
 
   const overlay = el('div', { class: 'photo-viewer-overlay' });
 
   const viewport = el('div', { class: 'photo-viewer-viewport' });
   const track = el('div', { class: 'photo-viewer-track' });
-  photos.forEach(p => {
-    track.appendChild(el('div', { class: 'slide' }, [el('img', { src: blobToUrl(p.photo), draggable: 'false' })]));
+  const slides = photos.map(p => {
+    const img = el('img', { src: blobToUrl(p.photo), draggable: 'false' });
+    const s = el('div', { class: 'slide' }, [img]);
+    track.appendChild(s);
+    return { el: s, img };
   });
   viewport.appendChild(track);
 
   const counter = el('div', { class: 'photo-viewer-counter' });
+  const zoomBadge = el('button', { class: 'zoom-badge glass', title: 'Reset zoom', onclick: () => resetZoom(true) });
 
   const header = el('div', { class: 'photo-viewer-header' }, [
-    el('button', { class: 'icon-btn', style: 'color:#fff', onclick: () => close() }, ['✕']),
+    el('button', { class: 'pv-btn glass', title: 'Close', onclick: () => close() }, [icon('close', 22)]),
     counter,
     readOnly
       ? el('span', { style: 'width:44px;display:inline-block;' })
-      : el('button', { class: 'icon-btn', style: 'color:#fff', onclick: deleteCurrent }, ['🗑'])
+      : el('button', { class: 'pv-btn glass', title: 'Delete photo', onclick: deleteCurrent }, [icon('trash', 20)])
   ]);
 
   const captionWrap = el('div', { class: 'photo-viewer-caption' });
@@ -471,18 +510,58 @@ function openPhotoViewer(photos, startIdx, hotspotId, onChange, opts = {}) {
 
   overlay.appendChild(header);
   overlay.appendChild(viewport);
+  overlay.appendChild(zoomBadge);
   overlay.appendChild(captionWrap);
   showOverlay(overlay);
 
+  // ---- zoom state of the current photo ----
+  let z = { s: 1, tx: 0, ty: 0 };
+  function curImg() { return slides[index] && slides[index].img; }
+  function fitRect() {
+    const img = curImg();
+    return img ? { fx: img.offsetLeft, fy: img.offsetTop, fw: img.offsetWidth || 1, fh: img.offsetHeight || 1, W: viewport.clientWidth, H: viewport.clientHeight } : null;
+  }
+  // Keep the zoomed photo covering the screen (or centred when smaller than it).
+  function clampZoom() {
+    const r = fitRect();
+    if (!r) return;
+    z.s = Math.max(1, Math.min(MAX_ZOOM, z.s));
+    const dw = r.fw * z.s, dh = r.fh * z.s;
+    z.tx = dw <= r.W ? (r.W - dw) / 2 - r.fx : Math.min(-r.fx, Math.max(r.W - r.fx - dw, z.tx));
+    z.ty = dh <= r.H ? (r.H - dh) / 2 - r.fy : Math.min(-r.fy, Math.max(r.H - r.fy - dh, z.ty));
+  }
+  function applyZoom(animate) {
+    const img = curImg();
+    if (!img) return;
+    img.style.transition = animate ? 'transform 0.26s cubic-bezier(0.22,0.61,0.36,1)' : 'none';
+    img.style.transform = z.s > 1.001 ? `translate3d(${z.tx}px, ${z.ty}px, 0) scale(${z.s})` : '';
+    const zoomed = z.s > 1.01;
+    overlay.classList.toggle('zoomed', zoomed);
+    zoomBadge.textContent = zoomed ? z.s.toFixed(1) + '×' : '';
+  }
+  // Zoom to scale s keeping viewport point (px, py) fixed on the photo.
+  function zoomAt(s, px, py, animate) {
+    const r = fitRect();
+    if (!r) return;
+    const q = { x: (px - r.fx - z.tx) / z.s, y: (py - r.fy - z.ty) / z.s };
+    z.s = Math.max(1, Math.min(MAX_ZOOM, s));
+    z.tx = px - r.fx - q.x * z.s;
+    z.ty = py - r.fy - q.y * z.s;
+    clampZoom();
+    applyZoom(animate);
+  }
+  function resetZoom(animate) { z = { s: 1, tx: 0, ty: 0 }; applyZoom(animate); }
+
   function layout() {
     const w = viewport.clientWidth;
-    Array.from(track.children).forEach(s => { s.style.width = w + 'px'; });
+    slides.forEach(s => { s.el.style.width = w + 'px'; });
     setTransform(false);
+    if (z.s > 1) { clampZoom(); applyZoom(false); }
   }
   function setTransform(animate) {
     const w = viewport.clientWidth;
     track.style.transition = animate ? 'transform 0.28s cubic-bezier(0.22,0.61,0.36,1)' : 'none';
-    track.style.transform = `translateX(${-index * w}px)`;
+    track.style.transform = `translate3d(${-index * w}px, 0, 0)`;
   }
   function sync() {
     const p = photos[index];
@@ -493,41 +572,110 @@ function openPhotoViewer(photos, startIdx, hotspotId, onChange, opts = {}) {
   function goTo(i, animate = true) {
     // Save the current photo's caption before moving to the next one.
     if (captionInput && captionInput.__save) captionInput.__save();
-    index = Math.max(0, Math.min(i, photos.length - 1));
+    const next = Math.max(0, Math.min(i, photos.length - 1));
+    if (next !== index) resetZoom(false);
+    index = next;
     setTransform(animate);
     sync();
   }
 
-  // Swipe: one gesture moves at most one image, based on distance dragged.
-  let startX = 0, dragging = false, dragDx = 0;
+  // ---- gestures ----
+  const pts = new Map();
+  let mode = null;          // 'swipe' | 'pan' | 'pinch'
+  let start = null, lastTap = null, moved = false;
+  const vpPoint = (e) => { const r = viewport.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+
   viewport.addEventListener('pointerdown', (e) => {
-    dragging = true; startX = e.clientX; dragDx = 0;
-    viewport.setPointerCapture(e.pointerId);
-    track.style.transition = 'none';
+    try { viewport.setPointerCapture(e.pointerId); } catch (err) {}
+    pts.set(e.pointerId, vpPoint(e));
+    if (pts.size === 1) {
+      const p = pts.get(e.pointerId);
+      moved = false;
+      mode = z.s > 1.01 ? 'pan' : 'swipe';
+      start = { x: p.x, y: p.y, tx: z.tx, ty: z.ty, t: Date.now() };
+      track.style.transition = 'none';
+    } else if (pts.size === 2) {
+      if (mode === 'swipe') setTransform(true); // cancel a half-done swipe
+      const [a, b] = Array.from(pts.values());
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, r = fitRect();
+      mode = 'pinch'; moved = true;
+      start = { dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, s: z.s, q: { x: (mid.x - r.fx - z.tx) / z.s, y: (mid.y - r.fy - z.ty) / z.s } };
+    }
   });
   viewport.addEventListener('pointermove', (e) => {
-    if (!dragging) return;
-    dragDx = e.clientX - startX;
-    const w = viewport.clientWidth;
-    let dx = dragDx;
-    if ((index === 0 && dx > 0) || (index === photos.length - 1 && dx < 0)) dx *= 0.35; // edge resistance
-    track.style.transform = `translateX(${-index * w + dx}px)`;
+    if (!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, vpPoint(e));
+    if (mode === 'pinch' && pts.size >= 2) {
+      const [a, b] = Array.from(pts.values());
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, r = fitRect();
+      const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+      z.s = Math.max(0.85, Math.min(MAX_ZOOM * 1.15, start.s * dist / start.dist)); // a little give past the limits
+      z.tx = mid.x - r.fx - start.q.x * z.s;
+      z.ty = mid.y - r.fy - start.q.y * z.s;
+      applyZoom(false);
+      return;
+    }
+    const p = pts.get(e.pointerId);
+    const dx = p.x - start.x, dy = p.y - start.y;
+    if (Math.hypot(dx, dy) > 6) moved = true;
+    if (mode === 'pan') {
+      z.tx = start.tx + dx; z.ty = start.ty + dy;
+      clampZoom();
+      applyZoom(false);
+    } else if (mode === 'swipe') {
+      const w = viewport.clientWidth;
+      let d = dx;
+      if ((index === 0 && d > 0) || (index === photos.length - 1 && d < 0)) d *= 0.35; // edge resistance
+      track.style.transform = `translate3d(${-index * w + d}px, 0, 0)`;
+    }
   });
-  function endDrag() {
-    if (!dragging) return;
-    dragging = false;
-    const w = viewport.clientWidth;
-    const threshold = Math.min(w * 0.18, 70);
-    if (dragDx <= -threshold) goTo(index + 1);
-    else if (dragDx >= threshold) goTo(index - 1);
-    else goTo(index);
+  function endPointer(e) {
+    if (!pts.has(e.pointerId)) return;
+    const p = pts.get(e.pointerId);
+    pts.delete(e.pointerId);
+    if (mode === 'pinch') {
+      if (pts.size === 1) { // continue panning with the remaining finger
+        const q = Array.from(pts.values())[0];
+        clampZoom(); applyZoom(true);
+        mode = z.s > 1.01 ? 'pan' : null;
+        start = { x: q.x, y: q.y, tx: z.tx, ty: z.ty, t: Date.now() };
+        return;
+      }
+      if (pts.size === 0) { if (z.s < 1.02) resetZoom(true); else { clampZoom(); applyZoom(true); } mode = null; }
+      return;
+    }
+    if (pts.size) return;
+    if (mode === 'swipe') {
+      const dx = p.x - start.x, w = viewport.clientWidth, threshold = Math.min(w * 0.18, 70);
+      if (moved && dx <= -threshold) goTo(index + 1);
+      else if (moved && dx >= threshold) goTo(index - 1);
+      else goTo(index);
+    }
+    // Double-tap: zoom in 2.5× on the spot, or back out to fit.
+    if (!moved) {
+      const now = Date.now();
+      if (lastTap && now - lastTap.t < 320 && Math.hypot(p.x - lastTap.x, p.y - lastTap.y) < 36) {
+        if (z.s > 1.01) resetZoom(true); else zoomAt(2.5, p.x, p.y, true);
+        lastTap = null;
+      } else lastTap = { x: p.x, y: p.y, t: now };
+    }
+    mode = null;
   }
-  viewport.addEventListener('pointerup', endDrag);
-  viewport.addEventListener('pointercancel', endDrag);
+  viewport.addEventListener('pointerup', endPointer);
+  viewport.addEventListener('pointercancel', endPointer);
+  viewport.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const p = vpPoint(e);
+    zoomAt(z.s * (e.deltaY < 0 ? 1.18 : 1 / 1.18), p.x, p.y, false);
+  }, { passive: false });
 
   const keyHandler = (e) => {
-    if (e.key === 'ArrowRight') goTo(index + 1);
-    else if (e.key === 'ArrowLeft') goTo(index - 1);
+    if (e.target === captionInput) return;
+    if (e.key === 'ArrowRight' && z.s <= 1.01) goTo(index + 1);
+    else if (e.key === 'ArrowLeft' && z.s <= 1.01) goTo(index - 1);
+    else if (e.key === '+' || e.key === '=') zoomAt(z.s * 1.4, viewport.clientWidth / 2, viewport.clientHeight / 2, true);
+    else if (e.key === '-') zoomAt(z.s / 1.4, viewport.clientWidth / 2, viewport.clientHeight / 2, true);
+    else if (e.key === '0') resetZoom(true);
     else if (e.key === 'Escape') close();
   };
   document.addEventListener('keydown', keyHandler);
@@ -556,8 +704,10 @@ function openPhotoViewer(photos, startIdx, hotspotId, onChange, opts = {}) {
     photos.splice(index, 1);
     onChange && onChange();
     if (!photos.length) { close(); return; }
-    track.children[index].remove();
+    slides[index].el.remove();
+    slides.splice(index, 1);
     if (index >= photos.length) index = photos.length - 1;
+    resetZoom(false);
     layout();
     sync();
   }

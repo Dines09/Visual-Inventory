@@ -4,13 +4,23 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Visual Inventory</title>
-<meta name="theme-color" content="#111418">
+<meta name="theme-color" content="#0a0c10">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<script>
+// Apply the saved theme before first paint so there's no light/dark flash on open.
+(function () {
+  try {
+    var t = localStorage.getItem('vi-theme');
+    if (t !== 'light' && t !== 'dark') t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', t);
+  } catch (e) { document.documentElement.setAttribute('data-theme', 'dark'); }
+})();
+</script>
 <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -19,7 +29,12 @@
 <script src="lib/minizip.js"></script>
 <script src="lib/xlsx-writer.js"></script>
 <script src="js/db.js"></script>
+<script src="js/icons.js"></script>
 <script src="js/helpers.js"></script>
+<script src="js/pano-math.js"></script>
+<script src="js/pano-stitch.js"></script>
+<script src="js/pano-viewer.js"></script>
+<script src="js/pano-capture.js"></script>
 <script src="js/app.js"></script>
 <script src="js/location-view.js"></script>
 <script src="js/hotspot-modal.js"></script>
@@ -36,18 +51,18 @@ if ('serviceWorker' in navigator) {
         if (!nw) return;
         nw.addEventListener('statechange', () => {
           // A new SW has installed and there was already one controlling the page →
-          // fresh code is ready; reload once so it takes effect immediately.
+          // fresh code is ready; reload once so it takes effect immediately — but never in
+          // the middle of a 360° capture or while a sheet is open (that would lose work).
           if (nw.state === 'installed' && navigator.serviceWorker.controller) {
-            window.location.reload();
+            const reloadWhenIdle = () => {
+              if (document.querySelector('.fs-overlay, .camera-overlay, .modal-overlay, .photo-viewer-overlay')) { setTimeout(reloadWhenIdle, 3000); return; }
+              window.location.reload();
+            };
+            reloadWhenIdle();
           }
         });
       });
     }).catch(err => console.error('SW registration failed', err));
-    // Guard so the reload above only ever fires once per page load.
-    let reloaded = false;
-    navigator.serviceWorker.addEventListener('controllerchange', () => {
-      if (reloaded) return; reloaded = true;
-    });
   });
 }
 </script>

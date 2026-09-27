@@ -1,11 +1,16 @@
-const CACHE_NAME = 'visual-inventory-v19';
+const CACHE_NAME = 'visual-inventory-v20';
 const ASSETS = [
   './',
   './index.html',
   './manifest.json',
   './css/style.css',
   './js/db.js',
+  './js/icons.js',
   './js/helpers.js',
+  './js/pano-math.js',
+  './js/pano-stitch.js',
+  './js/pano-viewer.js',
+  './js/pano-capture.js',
   './js/app.js',
   './js/location-view.js',
   './js/hotspot-modal.js',
