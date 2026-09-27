@@ -1,6 +1,6 @@
 const root = $('#app');
 const state = { view: null, locationId: null, folderId: null, mode: 'box' };
-const APP_VERSION = '2.0';
+const APP_VERSION = '2.1';
 
 // Every overlay that the Back button should close, topmost last in DOM order.
 const OVERLAY_SEL = '.modal-overlay, .photo-viewer-overlay, .camera-overlay, .fs-overlay';
@@ -79,19 +79,55 @@ function themeSwitch() {
   ]);
 }
 
-// ---- Hotspot clipboard (copy a box here, paste it in any location — even another store) ----
+// ---- Hotspot clipboard (copy boxes here, paste them in any location — even another store) ----
+// Holds one or many hotspots. Each item keeps its offset (in % of its page) from the group's
+// centre, so a pasted group keeps its arrangement. The clipboard empties itself after a paste
+// or after CLIP_TTL_MS without one, so a stale Paste button doesn't hang around.
+const CLIP_TTL_MS = 5 * 60 * 1000;
 function getClipboard() {
-  try { const c = JSON.parse(localStorage.getItem('vi-clipboard') || 'null'); return c && c.hotspotId ? c : null; } catch (e) { return null; }
+  let c = null;
+  try { c = JSON.parse(localStorage.getItem('vi-clipboard') || 'null'); } catch (e) { return null; }
+  if (!c) return null;
+  if (!c.items && c.hotspotId) { // clipboard written by v2.0: a single hotspot
+    c = { items: [{ hotspotId: c.hotspotId, name: c.name, number: c.number, type: c.type, dx: 0, dy: 0, kind: 'flat' }], locationId: c.locationId, locationName: c.locationName, at: c.at };
+  }
+  if (!Array.isArray(c.items) || !c.items.length) return null;
+  if (!c.at || Date.now() - c.at > CLIP_TTL_MS) { clearClipboard(); return null; }
+  return c;
 }
-function setClipboard(h, locName) {
-  const c = { hotspotId: h.id, name: h.name || '', number: h.number || '', type: h.type || 'box', locationId: h.locationId, locationName: locName || '', at: Date.now() };
+function clipItem(h, dx, dy, kind) {
+  return { hotspotId: h.id, name: h.name || '', number: h.number || '', type: h.type || 'box', dx: dx || 0, dy: dy || 0, kind: kind || 'flat' };
+}
+// hs: array of hotspots. kind: 'pano' | 'flat' (the scene they were copied from).
+function setClipboard(hs, locName, kind) {
+  hs = Array.isArray(hs) ? hs : [hs];
+  let cx = 0, cy = 0;
+  if (kind === 'pano') {
+    // x is longitude (wraps at 0/100), so average it on the circle.
+    let sx = 0, sy = 0;
+    hs.forEach(h => { const a = h.x / 50 * Math.PI; sx += Math.cos(a); sy += Math.sin(a); cy += h.y; });
+    cx = ((Math.atan2(sy, sx) / Math.PI * 50) + 100) % 100;
+  } else hs.forEach(h => { cx += h.x; cy += h.y; });
+  if (kind !== 'pano') cx /= hs.length;
+  cy /= hs.length;
+  const items = hs.map(h => {
+    let dx = h.x - cx;
+    if (kind === 'pano') dx = ((dx + 150) % 100) - 50;
+    return clipItem(h, dx, h.y - cy, kind);
+  });
+  const c = { items, locationId: hs[0].locationId, locationName: locName || '', at: Date.now() };
   try { localStorage.setItem('vi-clipboard', JSON.stringify(c)); } catch (e) {}
   return c;
 }
 function clearClipboard() { try { localStorage.removeItem('vi-clipboard'); } catch (e) {} }
 function clipLabel(c) {
-  if (!c) return '';
-  return c.name || (c.number ? '#' + c.number : (c.type === 'annotation' ? 'annotation' : 'box'));
+  if (!c || !c.items) return '';
+  if (c.items.length > 1) {
+    const allAnno = c.items.every(i => i.type === 'annotation');
+    return `${c.items.length} ${allAnno ? 'annotations' : 'boxes'}`;
+  }
+  const i = c.items[0];
+  return i.name || (i.number ? '#' + i.number : (i.type === 'annotation' ? 'annotation' : 'box'));
 }
 
 // ---- Rendering ----
@@ -254,8 +290,8 @@ async function renderHome() {
     el('div', { class: 'hh-row' }, [
       curFolder ? el('button', { class: 'icon-btn round', title: 'Back', onclick: () => { state.folderId = null; render(); } }, [icon('back')]) : null,
       el('div', { class: 'hh-title' }, [
-        el('div', { class: 'hh-kicker' }, [curFolder ? 'Folder' : 'Visual Inventory']),
-        el('h1', {}, [curFolder ? curFolder.name : 'Locations']),
+        curFolder ? el('div', { class: 'hh-kicker' }, ['Folder']) : null,
+        el('h1', {}, [curFolder ? curFolder.name : 'Visual Inventory']),
         el('div', { class: 'hh-sub' }, [curFolder
           ? `${locations.length} location${locations.length === 1 ? '' : 's'}`
           : `${allLocations.length} location${allLocations.length === 1 ? '' : 's'} · ${allHotspots.length} item${allHotspots.length === 1 ? '' : 's'}`])
@@ -265,7 +301,10 @@ async function renderHome() {
         : themeSwitch(),
       el('button', { class: 'icon-btn round', title: 'Settings', onclick: openSettings }, [icon('settings')])
     ]),
-    el('button', { class: 'search-pill', onclick: goSearch }, [icon('search', 18), el('span', {}, ['Search boxes, numbers, captions…'])])
+    el('div', { class: 'hh-tools' }, [
+      el('button', { class: 'search-pill', onclick: goSearch }, [icon('search', 18), el('span', {}, ['Search boxes & photos'])]),
+      layoutToggle()
+    ])
   ]);
   // The header lives inside the scroll area (sticky) so the tiles blur beneath its glass.
   const view = el('div', { class: 'view home-view' }, [header]);
@@ -279,7 +318,7 @@ async function renderHome() {
       curFolder ? null : el('button', { class: 'btn', onclick: openAddLocationModal }, [icon('plus', 20), 'Add first location'])
     ]));
   } else {
-    const grid = el('div', { class: 'location-grid' });
+    const grid = el('div', { class: 'location-grid ' + (getHomeLayout() === 'list' ? 'is-list' : 'is-grid') });
 
     // Folder tiles first (top level only).
     for (const f of folders) {
@@ -324,6 +363,26 @@ async function renderHome() {
   }
 
   if (!curFolder) root.appendChild(el('button', { class: 'fab', title: 'Add location', onclick: openAddLocationModal }, [icon('plus', 24), el('span', {}, ['New location'])]));
+}
+
+// Home tiles: 'grid' (small, two or more per row) or 'list' (one large tile per row).
+function getHomeLayout() { try { return localStorage.getItem('vi-home-layout') === 'list' ? 'list' : 'grid'; } catch (e) { return 'grid'; } }
+function layoutToggle() {
+  const cur = getHomeLayout();
+  const seg = el('div', { class: 'layout-toggle', role: 'group', 'aria-label': 'Tile size' });
+  [['grid', 'Grid view'], ['list', 'List view']].forEach(([k, label]) => {
+    seg.appendChild(el('button', {
+      class: 'lt-btn' + (k === cur ? ' on' : ''), title: label, 'aria-label': label, 'aria-pressed': String(k === cur),
+      onclick: () => {
+        if (getHomeLayout() === k) return;
+        try { localStorage.setItem('vi-home-layout', k); } catch (e) {}
+        seg.querySelectorAll('.lt-btn').forEach(b => { const on = b === seg.children[k === 'grid' ? 0 : 1]; b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); });
+        const g = document.querySelector('.location-grid');
+        if (g) { g.classList.toggle('is-list', k === 'list'); g.classList.toggle('is-grid', k === 'grid'); }
+      }
+    }, [icon(k, 18)]));
+  });
+  return seg;
 }
 
 // ---- Home-screen grouping: long-press menu + drag-and-drop ----
@@ -800,7 +859,12 @@ function openSettings() {
     group('Danger zone', [
       row('trash', 'Reset all data', 'Permanently deletes everything on this device', null, { onclick: () => resetData(), danger: true, tone: 'danger' })
     ], 'Export a backup first — this cannot be undone.'),
-    el('div', { class: 'about' }, [el('div', { class: 'about-logo' }, [icon('box', 22)]), el('div', {}, [`Visual Inventory ${APP_VERSION}`]), el('div', { class: 'about-sub' }, ['Works offline · data stays on this device'])])
+    el('div', { class: 'about' }, [
+      el('div', { class: 'about-logo' }, [icon('box', 22)]),
+      el('div', {}, [`Visual Inventory ${APP_VERSION}`]),
+      el('div', { class: 'about-sub' }, ['Works offline · data stays on this device']),
+      el('div', { class: 'about-credit' }, ['This web app is developed by ', el('b', {}, ['ETO']), el('div', { class: 'about-credit-sub' }, ['Electro-Technical Officer'])])
+    ])
   );
 
   const sheet = el('div', { class: 'modal-sheet settings-sheet' }, [

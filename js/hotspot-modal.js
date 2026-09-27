@@ -48,8 +48,9 @@ async function suggestNextNumber(locationId) {
 
 // Copy a hotspot to the app clipboard so it can be pasted (moved or duplicated) in any
 // location — including a different store.
-function copyHotspot(h, locName, btn) {
-  const c = setClipboard(h, locName);
+async function copyHotspot(h, locName, btn) {
+  const page = h.pageId ? await DB.getPage(h.pageId).catch(() => null) : null;
+  const c = setClipboard([h], locName, page && page.kind === 'pano' ? 'pano' : 'flat');
   showToast(`Copied “${clipLabel(c)}” — open any location and tap Paste`, 3200);
   if (btn) {
     btn.classList.add('done');

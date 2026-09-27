@@ -1,4 +1,4 @@
-const CACHE_NAME = 'visual-inventory-v20';
+const CACHE_NAME = 'visual-inventory-v21';
 const ASSETS = [
   './',
   './index.html',

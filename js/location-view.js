@@ -1,13 +1,14 @@
 let lvState = null; // per-location-view transient state
 // Modes persist across in-place re-renders (e.g. after a layout rotate/front/back) so a
 // toggle the user turned ON stays ON until they turn it OFF. Reset when the location changes.
-let lvModes = { locationId: null, addMode: false, relocateMode: false, layoutMode: false, pasteMode: false, sceneId: null };
+let lvModes = { locationId: null, addMode: false, relocateMode: false, layoutMode: false, pasteMode: false, selectMode: false, selected: [], sceneId: null };
 // The zoom/pan the user has set persists across in-place re-renders (e.g. after saving a
 // hotspot) so the canvas doesn't snap back to the fit-everything view. Reset per location.
 let lvViewport = { locationId: null, scale: 0, tx: 0, ty: 0 };
 // The 360° viewer survives in-place re-renders (no texture re-upload, no flicker, same view
 // direction). views[pageId] remembers where the user was looking in each scene.
 let panoCache = { pageId: null, viewer: null, views: {} };
+let clipExpiryTimer = null;
 
 function isPanoPage(p) { return !!p && p.kind === 'pano'; }
 
@@ -25,7 +26,7 @@ async function renderLocationView() {
   if (!loc) { destroyPanoCache(); goHome(); return; }
 
   if (lvModes.locationId !== loc.id) {
-    lvModes = { locationId: loc.id, addMode: false, relocateMode: false, layoutMode: false, pasteMode: false, sceneId: null };
+    lvModes = { locationId: loc.id, addMode: false, relocateMode: false, layoutMode: false, pasteMode: false, selectMode: false, selected: [], sceneId: null };
     panoCache.views = {};
     destroyPanoCache();
   }
@@ -52,6 +53,8 @@ async function renderLocationView() {
   if (!scene || scene.kind !== 'pano' || panoCache.pageId !== scene.id) destroyPanoCache();
   if (lvModes.layoutMode && (!scene || scene.kind !== 'flat')) lvModes.layoutMode = false;
   if (lvModes.pasteMode && !getClipboard()) lvModes.pasteMode = false;
+  // A selection belongs to one scene; switching scenes drops it.
+  if (lvModes.selectedScene !== lvModes.sceneId) { lvModes.selected = []; lvModes.selectedScene = lvModes.sceneId; }
 
   lvState = {
     scale: 1, tx: 0, ty: 0,
@@ -60,7 +63,9 @@ async function renderLocationView() {
     addMode: lvModes.addMode,
     relocateMode: lvModes.relocateMode,
     layoutMode: lvModes.layoutMode,  // when ON, drag whole pages to reposition them
-    pasteMode: lvModes.pasteMode,    // when ON, the next tap places the copied hotspot
+    pasteMode: lvModes.pasteMode,    // when ON, the next tap places the copied hotspot(s)
+    selectMode: lvModes.selectMode,  // when ON, tapping markers selects them (for multi-copy)
+    selected: new Set(lvModes.selected),
     highlightAnno: false,            // #16 highlight-all-annotations dim mode
     pages: [],                       // [{ page, block, img, pinLayer, w, h }] or one pano entry
     mode: scene ? scene.kind : null, // 'pano' | 'flat'
@@ -74,7 +79,7 @@ async function renderLocationView() {
   const topbar = el('header', { class: 'topbar glass-bar floating' }, [
     el('button', { class: 'icon-btn round', title: 'Back', onclick: () => history.back() }, [icon('back')]),
     el('div', { class: 'tb-title' }, [
-      el('h1', {}, [loc.name]),
+      el('h1', { class: (loc.name || '').length > 24 ? 'long' : '' }, [loc.name]),
       el('div', { class: 'tb-sub' }, [`${count} ${itemWord}${count === 1 ? '' : (isAnno ? 's' : 'es')}` + (scene && scene.kind === 'pano' ? ' · 360°' : '')])
     ]),
     // #16: annotation-only — highlight all annotations (dim the diagram behind them).
@@ -84,6 +89,10 @@ async function renderLocationView() {
     el('button', { class: 'icon-btn round', title: 'Edit location', onclick: () => openEditLocationModal(loc) }, [icon('edit')])
   ]);
   root.appendChild(topbar);
+  // Long names wrap onto a second line, so the chips/hint below follow the bar's real height.
+  const syncTopbarH = () => { if (topbar.isConnected) root.style.setProperty('--tb-h', topbar.offsetHeight + 'px'); };
+  if (window.ResizeObserver) new ResizeObserver(syncTopbarH).observe(topbar);
+  requestAnimationFrame(syncTopbarH);
 
   const viewWrap = el('div', { class: 'view location-wrap' });
   root.appendChild(viewWrap);
@@ -131,8 +140,9 @@ async function renderLocationView() {
 
   // Mode hint banner (what a tap will do right now) with a Done button.
   const hintText = el('span', { class: 'mh-text' });
+  const selActions = el('span', { class: 'mh-actions' });
   const hint = el('div', { class: 'mode-hint glass' }, [
-    el('span', { class: 'mh-dot' }), hintText,
+    el('span', { class: 'mh-dot' }), hintText, selActions,
     el('button', { class: 'mh-done', onclick: () => setMode(null) }, ['Done'])
   ]);
   viewer.appendChild(hint);
@@ -145,7 +155,8 @@ async function renderLocationView() {
   ]);
   const btns = [
     dockBtn('add', isAnno ? 'dot' : 'pinAdd', isAnno ? 'Add dot' : 'Add box', () => setMode('add')),
-    dockBtn('relocate', 'move', 'Move', () => setMode('relocate'))
+    dockBtn('relocate', 'move', 'Move', () => setMode('relocate')),
+    dockBtn('select', 'select', 'Select', () => setMode('select'))
   ];
   if (scene.kind === 'flat') btns.push(dockBtn('layout', 'layout', 'Arrange', () => setMode('layout')));
   if (scene.kind === 'pano' && PanoViewer.gyroAvailable()) {
@@ -168,15 +179,27 @@ async function renderLocationView() {
   viewer.appendChild(dock);
   lvState.dock = dock;
 
+  // The clipboard expires on its own; drop the Paste button when it does.
+  clearTimeout(clipExpiryTimer);
+  if (clip) {
+    clipExpiryTimer = setTimeout(() => {
+      if (state.view !== 'location' || getClipboard()) return;
+      lvModes.pasteMode = false;
+      render();
+      showToast('Clipboard cleared (not pasted for 5 minutes)');
+    }, Math.max(0, clip.at + CLIP_TTL_MS - Date.now()) + 250);
+  }
+
   function hintFor() {
     if (lvState.layoutMode) return 'Drag photos to arrange · two fingers rotate & resize';
     if (lvState.relocateMode) return 'Drag a marker, or tap it for fine arrows';
-    if (lvState.pasteMode) { const c = getClipboard(); return `Tap where “${clipLabel(c)}” should go`; }
+    if (lvState.pasteMode) { const c = getClipboard(); return c && c.items.length > 1 ? `Tap where the ${clipLabel(c)} should go — they keep their layout` : `Tap where “${clipLabel(c)}” should go`; }
+    if (lvState.selectMode) { const n = lvState.selected.size; return n ? `${n} selected — tap more, or Copy` : `Tap ${itemWord === 'box' ? 'boxes' : 'annotations'} to select them`; }
     if (lvState.addMode) return scene.kind === 'pano' ? `Tap anywhere in the 360° view to add a ${itemWord}` : (isAnno ? 'Tap the image to add a dot' : 'Tap the photo to add a box');
     return '';
   }
   function refreshModes() {
-    const active = lvState.addMode ? 'add' : lvState.relocateMode ? 'relocate' : lvState.layoutMode ? 'layout' : lvState.pasteMode ? 'paste' : null;
+    const active = lvState.addMode ? 'add' : lvState.relocateMode ? 'relocate' : lvState.layoutMode ? 'layout' : lvState.pasteMode ? 'paste' : lvState.selectMode ? 'select' : null;
     dock.querySelectorAll('.dock-btn').forEach(b => {
       const k = b.dataset.key;
       b.classList.toggle('on', k === active || (k === 'look' && !!(lvState.pano && lvState.pano.gyro)));
@@ -184,6 +207,22 @@ async function renderLocationView() {
     viewer.classList.toggle('add-mode', lvState.addMode || lvState.pasteMode);
     viewer.classList.toggle('relocate-mode', lvState.relocateMode);
     viewer.classList.toggle('layout-mode', lvState.layoutMode);
+    viewer.classList.toggle('select-mode', lvState.selectMode);
+    viewer.querySelectorAll('.pin').forEach(p => p.classList.toggle('selected', lvState.selectMode && lvState.selected.has(p.dataset.hotspotId)));
+    selActions.innerHTML = '';
+    if (lvState.selectMode) {
+      const pins = Array.prototype.slice.call(viewer.querySelectorAll('.pin'));
+      const allOn = pins.length && pins.every(p => lvState.selected.has(p.dataset.hotspotId));
+      const copyBtn = el('button', { class: 'mh-btn primary', onclick: () => copySelection(loc) }, [icon('copy', 15), 'Copy']);
+      copyBtn.disabled = !lvState.selected.size;
+      selActions.append(
+        el('button', { class: 'mh-btn', onclick: () => {
+          if (allOn) lvState.selected.clear(); else pins.forEach(p => lvState.selected.add(p.dataset.hotspotId));
+          refreshModes();
+        } }, [allOn ? 'None' : 'All']),
+        copyBtn
+      );
+    }
     const t = hintFor();
     hintText.textContent = t;
     hint.classList.toggle('show', !!t);
@@ -193,6 +232,8 @@ async function renderLocationView() {
     lvModes.relocateMode = lvState.relocateMode;
     lvModes.layoutMode = lvState.layoutMode;
     lvModes.pasteMode = lvState.pasteMode;
+    lvModes.selectMode = lvState.selectMode;
+    lvModes.selected = Array.from(lvState.selected);
   }
   lvState.refreshToggle = refreshModes;
   refreshModes();
@@ -203,8 +244,9 @@ async function renderLocationView() {
 function setMode(name) {
   if (!lvState) return;
   const on = name && !lvState[name + 'Mode'];
-  lvState.addMode = lvState.relocateMode = lvState.layoutMode = lvState.pasteMode = false;
+  lvState.addMode = lvState.relocateMode = lvState.layoutMode = lvState.pasteMode = lvState.selectMode = false;
   if (on) lvState[name + 'Mode'] = true;
+  if (!lvState.selectMode) lvState.selected.clear();
   hideNudgePad();
   if (lvState.refreshToggle) lvState.refreshToggle();
 }
@@ -1136,7 +1178,9 @@ function renderPin(h, entry) {
     if (pinDownPos) {
       const dx = e.clientX - pinDownPos.x, dy = e.clientY - pinDownPos.y;
       const isTap = Math.hypot(dx, dy) < 8;
-      if (lvState && lvState.relocateMode) {
+      if (lvState && lvState.selectMode) {
+        if (isTap) toggleSelected(h.id);
+      } else if (lvState && lvState.relocateMode) {
         if (wasDrag) {
           await DB.updateHotspot(h); // persist the dragged position
           showToast('Position updated');
@@ -1153,8 +1197,28 @@ function renderPin(h, entry) {
     pinDownPos = null;
   });
   pin.addEventListener('click', (e) => e.stopPropagation());
+  if (lvState && lvState.selectMode && lvState.selected.has(h.id)) pin.classList.add('selected');
 
   entry.place(pin, h);
+}
+
+// ---- Multi-select → copy ----
+function toggleSelected(id) {
+  if (!lvState) return;
+  if (lvState.selected.has(id)) lvState.selected.delete(id); else lvState.selected.add(id);
+  if (navigator.vibrate) navigator.vibrate(8);
+  if (lvState.refreshToggle) lvState.refreshToggle();
+}
+
+async function copySelection(loc) {
+  if (!lvState || !lvState.selected.size) return;
+  const hs = [];
+  for (const id of lvState.selected) { const h = await DB.getHotspot(id); if (h) hs.push(h); }
+  if (!hs.length) return;
+  const c = setClipboard(hs, loc.name, lvState.mode === 'pano' ? 'pano' : 'flat');
+  lvModes.selectMode = false; lvModes.selected = [];
+  render(); // the dock now shows Paste
+  showToast(`Copied ${hs.length > 1 ? clipLabel(c) : '“' + clipLabel(c) + '”'} — open any location and tap Paste`, 3200);
 }
 
 // Jump to a hotspot's marker on the canvas and pulse a red locate ring around it — used by
@@ -1341,43 +1405,84 @@ async function handleTapCreate(loc, pageId, xPct, yPct, entry) {
   });
 }
 
-// ---- Paste a copied hotspot here: move the original, or drop a copy ----
+// ---- Paste copied hotspot(s) here: move the originals, or drop copies ----
+// A group lands centred on the tapped point and keeps its arrangement. Offsets are stored in %
+// of the source page; between a 360° scene (360° × 180° wide) and a regular photo (roughly
+// 120° × 90°) they are rescaled so the group keeps a similar spread.
+function pastePositions(clip, x, y, destKind) {
+  return clip.items.map(it => {
+    let dx = it.dx || 0, dy = it.dy || 0;
+    if (it.kind === 'pano' && destKind !== 'pano') { dx *= 3; dy *= 2; }
+    else if (it.kind !== 'pano' && destKind === 'pano') { dx /= 3; dy /= 2; }
+    let nx = x + dx, ny = y + dy;
+    if (destKind === 'pano') { nx = ((nx % 100) + 100) % 100; ny = Math.min(99, Math.max(1, ny)); }
+    else { nx = Math.min(99, Math.max(1, nx)); ny = Math.min(99, Math.max(1, ny)); }
+    return { item: it, x: nx, y: ny };
+  });
+}
+
 async function handlePasteAt(loc, pageId, x, y) {
   const clip = getClipboard();
-  if (!clip) { setMode(null); return; }
-  const src = await DB.getHotspot(clip.hotspotId);
-  if (!src) {
+  if (!clip) { setMode(null); render(); showToast('Clipboard is empty'); return; }
+  const srcs = [];
+  for (const it of clip.items) { const h = await DB.getHotspot(it.hotspotId); if (h) srcs.push(h); }
+  if (!srcs.length) {
     clearClipboard();
-    showToast('The copied item no longer exists');
+    showToast(clip.items.length > 1 ? 'The copied items no longer exist' : 'The copied item no longer exists');
     lvModes.pasteMode = false;
     render();
     return;
   }
-  const fromLoc = src.locationId === loc.id ? null : await DB.getLocation(src.locationId);
+  const destKind = lvState && lvState.mode === 'pano' ? 'pano' : 'flat';
+  const places = pastePositions(clip, x, y, destKind).filter(p => srcs.some(h => h.id === p.item.hotspotId));
+  const many = places.length > 1;
+  const srcLocIds = Array.from(new Set(srcs.map(h => h.locationId)));
+  const fromLoc = srcLocIds.length === 1 && srcLocIds[0] !== loc.id ? await DB.getLocation(srcLocIds[0]) : null;
+  const allHere = srcLocIds.length === 1 && srcLocIds[0] === loc.id;
   const label = clipLabel(clip);
-  const photos = await DB.getPhotosForHotspot(src.id);
+  let photoCount = 0;
+  for (const h of srcs) photoCount += (await DB.getPhotosForHotspot(h.id)).length;
   const overlay = el('div', { class: 'modal-overlay' });
+  // Every paste empties the clipboard — the Paste button goes away with it.
   const finishWith = (hotspotId, msg) => {
     overlay.remove();
+    clearClipboard();
     lvModes.pasteMode = false;
     pendingLocate = { locationId: loc.id, hotspotId, noMove: true };
     render();
     showToast(msg);
   };
+  const thing = many ? label : (srcs[0].type === 'annotation' ? 'annotation' : 'box');
+  const photosTxt = photoCount ? ` and ${many ? 'their' : 'its'} ${photoCount} photo${photoCount === 1 ? '' : 's'}` : '';
   overlay.appendChild(el('div', { class: 'modal-sheet' }, [
     el('div', { class: 'sheet-grabber' }),
-    el('h2', {}, [`Place “${label}” here`]),
-    el('p', { class: 'sheet-sub' }, [fromLoc ? `It is currently in ${fromLoc.name}.` : 'It is currently elsewhere in this location.']),
+    el('h2', {}, [many ? `Place ${label} here` : `Place “${label}” here`]),
+    el('p', { class: 'sheet-sub' }, [fromLoc ? `${many ? 'They are' : 'It is'} currently in ${fromLoc.name}.` : allHere ? `${many ? 'They are' : 'It is'} currently elsewhere in this location.` : 'They come from more than one location.']),
     el('div', { class: 'menu-group' }, [
-      menuItem('move', 'Move it here', async () => {
-        await DB.moveHotspot(src.id, { locationId: loc.id, pageId, x, y });
-        clearClipboard();
-        finishWith(src.id, fromLoc ? `Moved from ${fromLoc.name}` : 'Moved here');
-      }, { sub: `Takes the ${src.type === 'annotation' ? 'annotation' : 'box'}${photos.length ? ` and its ${photos.length} photo${photos.length === 1 ? '' : 's'}` : ''} out of ${fromLoc ? fromLoc.name : 'its old spot'}` }),
-      menuItem('copy', 'Paste a copy', async () => {
-        const h = await DB.duplicateHotspot(src.id, { locationId: loc.id, pageId, x, y });
-        if (h) finishWith(h.id, 'Copy pasted');
-      }, { sub: 'Keeps the original where it is' })
+      menuItem('move', 'Move here', async () => {
+        for (const p of places) await DB.moveHotspot(p.item.hotspotId, { locationId: loc.id, pageId, x: p.x, y: p.y });
+        finishWith(places[0].item.hotspotId, many ? `Moved ${label}` : (fromLoc ? `Moved from ${fromLoc.name}` : 'Moved here'));
+      }, { sub: `Takes the ${thing}${photosTxt} out of ${fromLoc ? fromLoc.name : 'the old spot'}` }),
+      menuItem('copy', many ? 'Paste copies' : 'Paste a copy', async () => {
+        const sp = many ? showSpinner('Pasting…') : null;
+        try {
+          const map = {}, made = [];
+          for (const p of places) {
+            const h = await DB.duplicateHotspot(p.item.hotspotId, { locationId: loc.id, pageId, x: p.x, y: p.y });
+            if (h) { map[p.item.hotspotId] = h.id; made.push(h); }
+          }
+          // Annotation links between copied items point at the new copies, not the originals.
+          for (const h of made) {
+            const src = srcs.find(s => map[s.id] === h.id);
+            const links = (src && src.links) || [];
+            if (!links.length) continue;
+            const next = links.map(id => map[id] || (src.locationId === loc.id ? id : null)).filter(Boolean);
+            h.links = Array.from(new Set(next));
+            await DB.updateHotspot(h);
+          }
+          if (made.length) finishWith(made[0].id, many ? `Pasted ${made.length} copies` : 'Copy pasted');
+        } finally { if (sp) sp.remove(); }
+      }, { sub: `Keeps the original${many ? 's' : ''} where ${many ? 'they are' : 'it is'}` })
     ]),
     el('div', { class: 'btn-row' }, [
       el('button', { class: 'btn ghost', onclick: () => { overlay.remove(); clearClipboard(); lvModes.pasteMode = false; render(); showToast('Clipboard cleared'); } }, ['Clear clipboard']),
